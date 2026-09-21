@@ -1,0 +1,219 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 880" width="100%" height="auto" role="img" aria-label="echo hi 全系统控制流图">
+  <defs>
+    <marker id="m1-arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#6b6b78"/>
+    </marker>
+    <marker id="m1-arr-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#6c4cf5"/>
+    </marker>
+    <style>
+      .m1-txt{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;text-rendering:geometricPrecision}
+    </style>
+  </defs>
+
+  <!-- 泳道背景 -->
+  <rect x="20" y="40" width="220" height="820" fill="#fafafe" stroke="#e3e3ea" stroke-width="1"/>
+  <rect x="260" y="40" width="220" height="820" fill="#f6faff" stroke="#e3e3ea" stroke-width="1"/>
+  <rect x="500" y="40" width="220" height="820" fill="#fff8f0" stroke="#e3e3ea" stroke-width="1"/>
+  <rect x="740" y="40" width="180" height="820" fill="#fff8f0" stroke="#e3e3ea" stroke-width="1"/>
+
+  <!-- 泳道头 -->
+  <rect x="20" y="40" width="220" height="32" fill="#efe9ff" stroke="#6c4cf5" stroke-width="1"/>
+  <text x="130" y="61" text-anchor="middle" class="m1-txt" font-size="13" font-weight="700" fill="#1a1a23">用户态 · U mode · 用户栈</text>
+  <rect x="260" y="40" width="220" height="32" fill="#e8f1ff" stroke="#3aa0ff" stroke-width="1"/>
+  <text x="370" y="61" text-anchor="middle" class="m1-txt" font-size="13" font-weight="700" fill="#1a1a23">内核系统调用 · S · 进程内核栈</text>
+  <rect x="500" y="40" width="220" height="32" fill="#fff0e0" stroke="#ff8a3a" stroke-width="1"/>
+  <text x="610" y="61" text-anchor="middle" class="m1-txt" font-size="13" font-weight="700" fill="#1a1a23">内核驱动 · S · 内核栈</text>
+  <rect x="740" y="40" width="180" height="32" fill="#fff0e0" stroke="#ff8a3a" stroke-width="1"/>
+  <text x="830" y="61" text-anchor="middle" class="m1-txt" font-size="13" font-weight="700" fill="#1a1a23">硬件 · M / 设备</text>
+
+  <!-- 节点 1: shell getcmd→read -->
+  <rect x="40" y="90" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#6c4cf5" stroke-width="1.4"/>
+  <text x="130" y="110" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">① shell: getcmd→read(0)</text>
+  <text x="130" y="126" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">用户栈 · U · 无锁</text>
+  <text x="130" y="140" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">调 usys.pl 桩 → ecall</text>
+
+  <line x1="220" y1="118" x2="260" y2="118" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+  <text x="240" y="113" text-anchor="middle" class="m1-txt" font-size="10" fill="#6c4cf5">ecall</text>
+
+  <!-- 节点 2: uservec→usertrap -->
+  <rect x="280" y="90" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="370" y="110" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">② uservec → usertrap</text>
+  <text x="370" y="126" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">进程内核栈 · S · 无锁</text>
+  <text x="370" y="140" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">保 32 regs, scause 分发</text>
+
+  <line x1="370" y1="146" x2="370" y2="170" stroke="#6b6b78" stroke-width="1.4" marker-end="url(#m1-arr)"/>
+
+  <!-- 节点 3: sys_read -->
+  <rect x="280" y="174" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="370" y="194" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">③ syscall → sys_read</text>
+  <text x="370" y="210" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">进程内核栈 · S</text>
+  <text x="370" y="224" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">→ fileread(console)</text>
+
+  <line x1="370" y1="230" x2="370" y2="254" stroke="#6b6b78" stroke-width="1.4" marker-end="url(#m1-arr)"/>
+
+  <!-- 节点 4: shell sleep on console -->
+  <rect x="280" y="258" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4" stroke-dasharray="4 2"/>
+  <text x="370" y="278" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">④ sleep(&amp;cons.r, cons.lock)</text>
+  <text x="370" y="294" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">进程内核栈 · S</text>
+  <text x="370" y="308" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">持 cons.lock → release→sleep</text>
+
+  <line x1="460" y1="286" x2="500" y2="286" stroke="#6b6b78" stroke-width="1.4" marker-end="url(#m1-arr)" stroke-dasharray="4 2"/>
+  <text x="480" y="281" text-anchor="middle" class="m1-txt" font-size="10" fill="#6b6b78">阻塞</text>
+
+  <!-- 节点 5: 硬件键盘输入 -->
+  <rect x="520" y="258" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#ff8a3a" stroke-width="1.4"/>
+  <text x="610" y="278" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑤ 用户敲键盘 "echo hi↵"</text>
+  <text x="610" y="294" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">UART RXTX IRQ · M→S</text>
+  <text x="610" y="308" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">→ consoleintr → 唤醒 shell</text>
+
+  <line x1="610" y1="314" x2="610" y2="338" stroke="#6b6b78" stroke-width="1.4" marker-end="url(#m1-arr)"/>
+
+  <!-- 节点 6: wakeup shell -->
+  <rect x="520" y="342" width="180" height="50" rx="6" ry="6" fill="#ffffff" stroke="#ff8a3a" stroke-width="1.4"/>
+  <text x="610" y="360" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑥ consoleintr → wakeup</text>
+  <text x="610" y="378" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">设 RUNNABLE，回到调度</text>
+
+  <line x1="520" y1="367" x2="460" y2="367" stroke="#6b6b78" stroke-width="1.4" marker-end="url(#m1-arr)"/>
+
+  <!-- 节点 7: shell 返回用户态 -->
+  <rect x="280" y="342" width="180" height="50" rx="6" ry="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="370" y="360" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑦ sys_read 返回</text>
+  <text x="370" y="378" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">→ userret → sret</text>
+
+  <line x1="280" y1="367" x2="220" y2="367" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+  <text x="250" y="362" text-anchor="middle" class="m1-txt" font-size="10" fill="#6c4cf5">sret</text>
+
+  <!-- 节点 8: shell parsecmd + fork1 -->
+  <rect x="40" y="402" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#6c4cf5" stroke-width="1.4"/>
+  <text x="130" y="422" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑧ parsecmd("echo hi")</text>
+  <text x="130" y="438" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">用户栈 · U · fork1()</text>
+  <text x="130" y="452" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">→ ecall → sys_fork</text>
+
+  <line x1="220" y1="430" x2="260" y2="430" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+  <text x="240" y="425" text-anchor="middle" class="m1-txt" font-size="10" fill="#6c4cf5">ecall</text>
+
+  <!-- 节点 9: fork + uvmcopy -->
+  <rect x="280" y="402" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="370" y="422" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑨ sys_fork → copyproc</text>
+  <text x="370" y="438" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">进程内核栈 · S</text>
+  <text x="370" y="452" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">+uvmcopy(复制页表) 持 wait_lock</text>
+
+  <line x1="280" y1="458" x2="220" y2="490" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+  <text x="240" y="478" text-anchor="middle" class="m1-txt" font-size="10" fill="#6c4cf5">父 ret→pid</text>
+  <line x1="280" y1="458" x2="220" y2="540" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+  <text x="240" y="528" text-anchor="middle" class="m1-txt" font-size="10" fill="#6c4cf5">子 ret→0</text>
+
+  <!-- 节点 10: 父进程 wait -->
+  <rect x="40" y="486" width="180" height="48" rx="6" ry="6" fill="#ffffff" stroke="#6c4cf5" stroke-width="1.4"/>
+  <text x="130" y="506" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑩ shell 父: wait(0)</text>
+  <text x="130" y="524" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">用户栈 · U → ecall</text>
+
+  <line x1="220" y1="510" x2="260" y2="510" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+
+  <rect x="280" y="486" width="180" height="48" rx="6" ry="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4" stroke-dasharray="4 2"/>
+  <text x="370" y="506" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑩b sys_wait → sleep</text>
+  <text x="370" y="524" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">sleep(&amp;wait_lock) · S</text>
+
+  <!-- 节点 11: 子进程 exec -->
+  <rect x="40" y="555" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#6c4cf5" stroke-width="1.4"/>
+  <text x="130" y="575" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑪ shell 子: runcmd</text>
+  <text x="130" y="591" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">exec("echo", argv)</text>
+  <text x="130" y="605" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">用户栈 · U → ecall</text>
+
+  <line x1="220" y1="583" x2="260" y2="583" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+
+  <!-- 节点 12: kexec -->
+  <rect x="280" y="555" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="370" y="575" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑫ sys_exec → kexec</text>
+  <text x="370" y="591" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">进程内核栈 · S · 无锁</text>
+  <text x="370" y="605" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">读ELF·建新页表·换页表</text>
+
+  <line x1="280" y1="611" x2="220" y2="611" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+  <text x="250" y="606" text-anchor="middle" class="m1-txt" font-size="10" fill="#6c4cf5">sret</text>
+
+  <!-- 节点 13: echo main + write -->
+  <rect x="40" y="635" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#6c4cf5" stroke-width="1.4"/>
+  <text x="130" y="655" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑬ echo main: write(1,"hi\n")</text>
+  <text x="130" y="671" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">用户栈 · U → ecall</text>
+  <text x="130" y="685" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">stdout=fd1, 文件表→console</text>
+
+  <line x1="220" y1="663" x2="260" y2="663" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+
+  <!-- 节点 14: sys_write → filewrite -->
+  <rect x="280" y="635" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="370" y="655" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑭ sys_write→filewrite</text>
+  <text x="370" y="671" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">进程内核栈 · S</text>
+  <text x="370" y="685" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">FILE_DEVICE→consolewrite</text>
+
+  <line x1="460" y1="663" x2="500" y2="663" stroke="#6b6b78" stroke-width="1.4" marker-end="url(#m1-arr)"/>
+
+  <!-- 节点 15: consolewrite → uartputc -->
+  <rect x="520" y="635" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#ff8a3a" stroke-width="1.4"/>
+  <text x="610" y="655" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑮ consolewrite→uartputc</text>
+  <text x="610" y="671" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">内核栈 · S · 持 cons.lock</text>
+  <text x="610" y="685" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">缓冲满则 sleep(&amp;tx_r)</text>
+
+  <line x1="700" y1="663" x2="740" y2="663" stroke="#6b6b78" stroke-width="1.4" marker-end="url(#m1-arr)"/>
+
+  <!-- 节点 16: UART 寄存器 -->
+  <rect x="760" y="635" width="140" height="56" rx="6" ry="6" fill="#ffffff" stroke="#ff8a3a" stroke-width="1.4"/>
+  <text x="830" y="655" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑯ UART THR 写入</text>
+  <text x="830" y="671" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">MMIO 0x10000000</text>
+  <text x="830" y="685" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">QEMU 终端打印 hi</text>
+
+  <line x1="520" y1="691" x2="280" y2="691" stroke="#6b6b78" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#m1-arr)"/>
+  <text x="400" y="687" text-anchor="middle" class="m1-txt" font-size="10" fill="#6b6b78">consolewrite 返回</text>
+
+  <line x1="280" y1="691" x2="40" y2="691" stroke="#6c4cf5" stroke-width="1.6" stroke-dasharray="3 3" marker-end="url(#m1-arr-b)"/>
+  <text x="160" y="687" text-anchor="middle" class="m1-txt" font-size="10" fill="#6c4cf5">sys_write 返回→sret</text>
+
+  <!-- 节点 17: echo exit -->
+  <rect x="40" y="715" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#6c4cf5" stroke-width="1.4"/>
+  <text x="130" y="735" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑰ echo main return→exit</text>
+  <text x="130" y="751" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">用户栈 · U → ecall</text>
+  <text x="130" y="765" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">exit(0)</text>
+
+  <line x1="220" y1="743" x2="260" y2="743" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+
+  <!-- 节点 18: sys_exit + wakeup -->
+  <rect x="280" y="715" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="370" y="735" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑱ sys_exit→ZOMBIE</text>
+  <text x="370" y="751" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">进程内核栈 · S</text>
+  <text x="370" y="765" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">wakeup(parent)→scheduler</text>
+
+  <line x1="460" y1="743" x2="500" y2="743" stroke="#6b6b78" stroke-width="1.4" marker-end="url(#m1-arr)"/>
+  <text x="480" y="738" text-anchor="middle" class="m1-txt" font-size="10" fill="#6b6b78">唤醒</text>
+
+  <!-- 节点 19: scheduler -->
+  <rect x="520" y="715" width="180" height="56" rx="6" ry="6" fill="#f5f5f8" stroke="#6b6b78" stroke-width="1.4"/>
+  <text x="610" y="735" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑲ scheduler→swtch</text>
+  <text x="610" y="751" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">调度器专门栈 · S</text>
+  <text x="610" y="765" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">选 shell 父进程 RUNNABLE</text>
+
+  <line x1="520" y1="743" x2="280" y2="743" stroke="#6b6b78" stroke-width="1.4" stroke-dasharray="4 2" marker-end="url(#m1-arr)"/>
+  <line x1="280" y1="743" x2="40" y2="743" stroke="#6c4cf5" stroke-width="1.6" stroke-dasharray="4 2" marker-end="url(#m1-arr-b)"/>
+  <text x="160" y="738" text-anchor="middle" class="m1-txt" font-size="10" fill="#6c4cf5">wait 返回→sret</text>
+
+  <!-- 节点 20: shell 回到循环顶 -->
+  <rect x="40" y="795" width="180" height="56" rx="6" ry="6" fill="#ffffff" stroke="#6c4cf5" stroke-width="1.4"/>
+  <text x="130" y="815" text-anchor="middle" class="m1-txt" font-size="12" font-weight="700" fill="#1a1a23">⑳ shell 父: wait 回收子</text>
+  <text x="130" y="831" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">用户栈 · U · freeproc(zombie)</text>
+  <text x="130" y="845" text-anchor="middle" class="m1-txt" font-size="11" fill="#6b6b78">回 while 顶 → ① 重新 getcmd</text>
+
+  <!-- 循环回顶部 -->
+  <path d="M 130 795 Q 30 795 30 400 Q 30 118 40 118" fill="none" stroke="#6c4cf5" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#m1-arr-b)"/>
+  <text x="20" y="500" text-anchor="middle" class="m1-txt" font-size="10" fill="#6c4cf5" transform="rotate(-90 20 500)">循环回 ①</text>
+
+  <!-- 图例 -->
+  <rect x="760" y="795" width="140" height="56" rx="6" ry="6" fill="#ffffff" stroke="#e3e3ea" stroke-width="1"/>
+  <text x="770" y="812" class="m1-txt" font-size="10" font-weight="700" fill="#1a1a23">图例</text>
+  <line x1="770" y1="820" x2="790" y2="820" stroke="#6c4cf5" stroke-width="1.6" marker-end="url(#m1-arr-b)"/>
+  <text x="795" y="823" class="m1-txt" font-size="9" fill="#6c4cf5">特权切换</text>
+  <line x1="770" y1="832" x2="790" y2="832" stroke="#6b6b78" stroke-width="1.4" marker-end="url(#m1-arr)"/>
+  <text x="795" y="835" class="m1-txt" font-size="9" fill="#6b6b78">同步调用</text>
+  <line x1="845" y1="820" x2="865" y2="820" stroke="#6b6b78" stroke-width="1.4" stroke-dasharray="4 2" marker-end="url(#m1-arr)"/>
+  <text x="870" y="823" class="m1-txt" font-size="9" fill="#6b6b78">阻塞/唤醒</text>
+  <line x1="845" y1="832" x2="865" y2="832" stroke="#6c4cf5" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#m1-arr-b)"/>
+  <text x="870" y="835" class="m1-txt" font-size="9" fill="#6c4cf5">循环</text>
+</svg>

@@ -1,0 +1,196 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1100" width="100%" height="auto" role="img" aria-label="时钟中断微观旅程">
+  <defs>
+    <marker id="m3-arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#6b6b78"/>
+    </marker>
+    <marker id="m3-arr-u" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#6c4cf5"/>
+    </marker>
+    <marker id="m3-arr-k" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7 Z" fill="#3aa0ff"/>
+    </marker>
+    <style>
+      .m3-txt{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;text-rendering:geometricPrecision}
+    </style>
+  </defs>
+
+  <!-- 时间轴泳道头 -->
+  <rect x="10" y="40" width="240" height="32" fill="#efe9ff" stroke="#6c4cf5"/>
+  <text x="130" y="61" text-anchor="middle" class="m3-txt" font-size="12" font-weight="700">用户态 (U)</text>
+  <rect x="260" y="40" width="240" height="32" fill="#e8f1ff" stroke="#3aa0ff"/>
+  <text x="380" y="61" text-anchor="middle" class="m3-txt" font-size="12" font-weight="700">内核系统调用栈 (S)</text>
+  <rect x="510" y="40" width="240" height="32" fill="#fff0e0" stroke="#ff8a3a"/>
+  <text x="630" y="61" text-anchor="middle" class="m3-txt" font-size="12" font-weight="700">调度器 (S)</text>
+  <rect x="760" y="40" width="310" height="32" fill="#f5f5f8" stroke="#6b6b78"/>
+  <text x="915" y="61" text-anchor="middle" class="m3-txt" font-size="12" font-weight="700">寄存器现场 / 关键状态</text>
+
+  <!-- 时间轴主线 -->
+  <line x1="130" y1="80" x2="130" y2="1080" stroke="#6c4cf5" stroke-width="1.2" stroke-dasharray="3 2"/>
+  <line x1="380" y1="80" x2="380" y2="1080" stroke="#3aa0ff" stroke-width="1.2" stroke-dasharray="3 2"/>
+  <line x1="630" y1="80" x2="630" y2="1080" stroke="#ff8a3a" stroke-width="1.2" stroke-dasharray="3 2"/>
+
+  <text x="20" y="90" class="m3-txt" font-size="11" font-weight="700" fill="#6b6b78">截面时刻：</text>
+  <text x="20" y="105" class="m3-txt" font-size="10" fill="#6b6b78">echo 进程在用户态跑某条指令时被打断</text>
+
+  <!-- ============== 阶段 1: echo 在用户态执行 ============== -->
+  <rect x="40" y="125" width="180" height="60" rx="6" fill="#ffffff" stroke="#6c4cf5" stroke-width="1.4"/>
+  <text x="50" y="143" class="m3-txt" font-size="12" font-weight="700" fill="#1a1a23">① echo main 执行中</text>
+  <text x="50" y="158" class="m3-txt" font-size="10" fill="#6b6b78">用户栈 · U mode</text>
+  <text x="50" y="172" class="m3-txt" font-size="10" fill="#6b6b78">PC = 某 va (代码段内)</text>
+  <text x="50" y="186" class="m3-txt" font-size="10" fill="#6b6b78">CPU: a0~a7, ra, sp 等</text>
+
+  <!-- 寄存器现场 -->
+  <rect x="770" y="125" width="290" height="60" rx="6" fill="#fafaff" stroke="#6c4cf5"/>
+  <text x="780" y="143" class="m3-txt" font-size="11" font-weight="700">关键 CSR 现场</text>
+  <text x="780" y="158" class="m3-txt" font-size="10" fill="#6b6b78">sstatus.SPP=0 (来自 U)</text>
+  <text x="780" y="172" class="m3-txt" font-size="10" fill="#6b6b78">stvec = uservec (TRAMPOLINE)</text>
+  <text x="780" y="186" class="m3-txt" font-size="10" fill="#6b6b78">sscratch = p->trapframe</text>
+
+  <!-- 箭头：时钟中断触发 -->
+  <line x1="130" y1="185" x2="130" y2="215" stroke="#ff8a3a" stroke-width="2" marker-end="url(#m3-arr)"/>
+  <text x="140" y="205" class="m3-txt" font-size="10" font-weight="700" fill="#ff8a3a">② 时钟硬件触发 IRQ</text>
+
+  <!-- ============== 阶段 2: 时钟中断硬件路径 ============== -->
+  <rect x="770" y="215" width="290" height="100" rx="6" fill="#fff8f0" stroke="#ff8a3a" stroke-width="1.4"/>
+  <text x="780" y="233" class="m3-txt" font-size="11" font-weight="700">硬件 / M 路径</text>
+  <text x="780" y="250" class="m3-txt" font-size="10" fill="#6b6b78">CLINT mtime &gt; mtimecmp</text>
+  <text x="780" y="264" class="m3-txt" font-size="10" fill="#6b6b78">→ 触发 supervisor timer IRQ</text>
+  <text x="780" y="278" class="m3-txt" font-size="10" fill="#6b6b78">scause = 0x8000000000000005</text>
+  <text x="780" y="292" class="m3-txt" font-size="10" fill="#6b6b78">  bit63=1 中断, code=5 S-timer</text>
+  <text x="780" y="306" class="m3-txt" font-size="10" fill="#6b6b78">硬件跳 stvec 指向的 uservec</text>
+
+  <!-- 箭头从 U 跳到 S -->
+  <line x1="220" y1="225" x2="280" y2="225" stroke="#6c4cf5" stroke-width="2" marker-end="url(#m3-arr-u)"/>
+  <text x="250" y="220" text-anchor="middle" class="m3-txt" font-size="10" font-weight="700" fill="#6c4cf5">硬件 trap</text>
+
+  <!-- ============== 阶段 3: uservec 保存现场 ============== -->
+  <rect x="280" y="335" width="220" height="80" rx="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="290" y="353" class="m3-txt" font-size="12" font-weight="700" fill="#1a1a23">③ uservec (trampoline.S)</text>
+  <text x="290" y="368" class="m3-txt" font-size="10" fill="#6b6b78">csrrw sp, sscratch, sp</text>
+  <text x="290" y="382" class="m3-txt" font-size="10" fill="#6b6b78">→ 32 regs 存入 trapframe</text>
+  <text x="290" y="396" class="m3-txt" font-size="10" fill="#6b6b78">sp = p->trapframe->kernel_sp</text>
+  <text x="290" y="410" class="m3-txt" font-size="10" fill="#6b6b78">jr usertrap (设 stvec=kernelvec)</text>
+
+  <line x1="280" y1="375" x2="280" y2="375" stroke="#6b6b78"/>
+
+  <!-- ============== 阶段 4: usertrap ============== -->
+  <rect x="280" y="425" width="220" height="90" rx="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="290" y="443" class="m3-txt" font-size="12" font-weight="700" fill="#1a1a23">④ usertrap (trap.c)</text>
+  <text x="290" y="458" class="m3-txt" font-size="10" fill="#6b6b78">校验 sstatus.SPP=0</text>
+  <text x="290" y="472" class="m3-txt" font-size="10" fill="#6b6b78">w_stvec(kernelvec)</text>
+  <text x="290" y="486" class="m3-txt" font-size="10" fill="#6b6b78">p->trapframe->epc = r_sepc</text>
+  <text x="290" y="500" class="m3-txt" font-size="10" fill="#6b6b78">→ which_dev = devintr()</text>
+
+  <!-- ============== 阶段 5: devintr → clockintr → return 2 ============== -->
+  <rect x="280" y="525" width="220" height="80" rx="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="290" y="543" class="m3-txt" font-size="12" font-weight="700" fill="#1a1a23">⑤ devintr → clockintr</text>
+  <text x="290" y="558" class="m3-txt" font-size="10" fill="#6b6b78">读 scause</text>
+  <text x="290" y="572" class="m3-txt" font-size="10" fill="#6b6b78">==0x...05 → clockintr()</text>
+  <text x="290" y="586" class="m3-txt" font-size="10" fill="#6b6b78">设下次 mtimecmp</text>
+  <text x="290" y="600" class="m3-txt" font-size="10" fill="#6b6b78">return 2 (timer)</text>
+
+  <!-- ============== 阶段 6: yield → sched ============== -->
+  <rect x="280" y="615" width="220" height="100" rx="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="290" y="633" class="m3-txt" font-size="12" font-weight="700" fill="#1a1a23">⑥ yield → sched</text>
+  <text x="290" y="648" class="m3-txt" font-size="10" fill="#6b6b78">acquire(&amp;p->lock)</text>
+  <text x="290" y="662" class="m3-txt" font-size="10" fill="#6b6b78">p->state = RUNNABLE</text>
+  <text x="290" y="676" class="m3-txt" font-size="10" fill="#6b6b78">sched():</text>
+  <text x="290" y="690" class="m3-txt" font-size="10" fill="#6b6b78">  检查 state/intr/locks</text>
+  <text x="290" y="704" class="m3-txt" font-size="10" fill="#6b6b78">  swtch(&amp;p->context,</text>
+  <text x="290" y="718" class="m3-txt" font-size="10" fill="#6b6b78">         &amp;mycpu()->context)</text>
+
+  <!-- 箭头：从 S 跳到调度器 -->
+  <line x1="500" y1="665" x2="520" y2="665" stroke="#ff8a3a" stroke-width="2" marker-end="url(#m3-arr)"/>
+  <line x1="520" y1="665" x2="540" y2="665" stroke="#ff8a3a" stroke-width="2" marker-end="url(#m3-arr)"/>
+  <line x1="540" y1="665" x2="560" y2="665" stroke="#ff8a3a" stroke-width="2" marker-end="url(#m3-arr)"/>
+  <text x="530" y="660" text-anchor="middle" class="m3-txt" font-size="10" font-weight="700" fill="#ff8a3a">swtch</text>
+
+  <!-- 寄存器：swtch 保存什么 -->
+  <rect x="770" y="615" width="290" height="100" rx="6" fill="#fafaff" stroke="#3aa0ff"/>
+  <text x="780" y="633" class="m3-txt" font-size="11" font-weight="700">swtch 保存的 callee-saved</text>
+  <text x="780" y="650" class="m3-txt" font-size="10" fill="#6b6b78">ra (返回地址)</text>
+  <text x="780" y="664" class="m3-txt" font-size="10" fill="#6b6b78">sp (栈指针)</text>
+  <text x="780" y="678" class="m3-txt" font-size="10" fill="#6b6b78">s0~s11 (12 个 callee-saved)</text>
+  <text x="780" y="692" class="m3-txt" font-size="10" fill="#6b6b78">共 14 个 8 字节 = 112B</text>
+  <text x="780" y="706" class="m3-txt" font-size="10" fill="#6b6b78">★ 不保存 a0~a7/t0~t6 (caller-saved)</text>
+
+  <!-- ============== 阶段 7: scheduler ============== -->
+  <rect x="530" y="735" width="220" height="100" rx="6" fill="#ffffff" stroke="#ff8a3a" stroke-width="1.4"/>
+  <text x="540" y="753" class="m3-txt" font-size="12" font-weight="700" fill="#1a1a23">⑦ scheduler (proc.c)</text>
+  <text x="540" y="768" class="m3-txt" font-size="10" fill="#6b6b78">跑在调度器专门栈</text>
+  <text x="540" y="782" class="m3-txt" font-size="10" fill="#6b6b78">for(;;) {</text>
+  <text x="540" y="796" class="m3-txt" font-size="10" fill="#6b6b78">  找 RUNNABLE 进程 p</text>
+  <text x="540" y="810" class="m3-txt" font-size="10" fill="#6b6b78">  swtch(&amp;c->context,</text>
+  <text x="540" y="824" class="m3-txt" font-size="10" fill="#6b6b78">         &amp;p->context)</text>
+
+  <!-- 寄存器：scheduler 关键 -->
+  <rect x="770" y="735" width="290" height="100" rx="6" fill="#fff8f0" stroke="#ff8a3a"/>
+  <text x="780" y="753" class="m3-txt" font-size="11" font-weight="700">scheduler 切到的进程</text>
+  <text x="780" y="770" class="m3-txt" font-size="10" fill="#6b6b78">★ 任意 RUNNABLE (可能就是 echo)</text>
+  <text x="780" y="784" class="m3-txt" font-size="10" fill="#6b6b78">  也可能是 shell、init、其他</text>
+  <text x="780" y="798" class="m3-txt" font-size="10" fill="#6b6b78">w_satp(p->pagetable)</text>
+  <text x="780" y="812" class="m3-txt" font-size="10" fill="#6b6b78">  → 切换地址空间</text>
+  <text x="780" y="826" class="m3-txt" font-size="10" fill="#6b6b78">set p->state = RUNNING</text>
+
+  <!-- 箭头：scheduler swtch 回到 echo 进程 -->
+  <line x1="530" y1="785" x2="510" y2="785" stroke="#3aa0ff" stroke-width="2" marker-end="url(#m3-arr-k)"/>
+  <line x1="510" y1="785" x2="490" y2="785" stroke="#3aa0ff" stroke-width="2" marker-end="url(#m3-arr-k)"/>
+  <text x="520" y="780" text-anchor="middle" class="m3-txt" font-size="10" font-weight="700" fill="#3aa0ff">swtch 切回</text>
+
+  <!-- ============== 阶段 8: 回到 sched → yield ============== -->
+  <rect x="280" y="855" width="220" height="80" rx="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="290" y="873" class="m3-txt" font-size="12" font-weight="700" fill="#1a1a23">⑧ sched 返回 → yield 返回</text>
+  <text x="290" y="888" class="m3-txt" font-size="10" fill="#6b6b78">swtch ret 到 sched()</text>
+  <text x="290" y="902" class="m3-txt" font-size="10" fill="#6b6b78">  的调用者 yield()</text>
+  <text x="290" y="916" class="m3-txt" font-size="10" fill="#6b6b78">release(&amp;p->lock)</text>
+
+  <!-- ============== 阶段 9: prepare_return ============== -->
+  <rect x="280" y="945" width="220" height="80" rx="6" fill="#ffffff" stroke="#3aa0ff" stroke-width="1.4"/>
+  <text x="290" y="963" class="m3-txt" font-size="12" font-weight="700" fill="#1a1a23">⑨ prepare_return (原 usertrapret)</text>
+  <text x="290" y="978" class="m3-txt" font-size="10" fill="#6b6b78">关中断 (sstatus.SIE=0)</text>
+  <text x="290" y="992" class="m3-txt" font-size="10" fill="#6b6b78">设 stvec = uservec</text>
+  <text x="290" y="1006" class="m3-txt" font-size="10" fill="#6b6b78">填 trapframe.kernel_trap</text>
+  <text x="290" y="1020" class="m3-txt" font-size="10" fill="#6b6b78">jr userret (trampoline.S)</text>
+
+  <!-- 箭头：回到用户态 -->
+  <line x1="280" y1="985" x2="220" y2="985" stroke="#6c4cf5" stroke-width="2" marker-end="url(#m3-arr-u)"/>
+  <text x="250" y="980" text-anchor="middle" class="m3-txt" font-size="10" font-weight="700" fill="#6c4cf5">sret</text>
+
+  <!-- ============== 阶段 10: 回到用户态 ============== -->
+  <rect x="40" y="945" width="180" height="80" rx="6" fill="#ffffff" stroke="#6c4cf5" stroke-width="1.4"/>
+  <text x="50" y="963" class="m3-txt" font-size="12" font-weight="700" fill="#1a1a23">⑩ 回到 echo 用户态</text>
+  <text x="50" y="978" class="m3-txt" font-size="10" fill="#6b6b78">userret 恢复 32 regs</text>
+  <text x="50" y="992" class="m3-txt" font-size="10" fill="#6b6b78">sret → U mode</text>
+  <text x="50" y="1006" class="m3-txt" font-size="10" fill="#6b6b78">PC = trapframe->epc</text>
+  <text x="50" y="1020" class="m3-txt" font-size="10" fill="#6b6b78">(原被打断的指令)</text>
+
+  <!-- 时间轴标记 -->
+  <text x="20" y="160" class="m3-txt" font-size="9" fill="#6b6b78">t=0</text>
+  <text x="20" y="235" class="m3-txt" font-size="9" fill="#6b6b78">t=1</text>
+  <text x="20" y="375" class="m3-txt" font-size="9" fill="#6b6b78">t=2</text>
+  <text x="20" y="470" class="m3-txt" font-size="9" fill="#6b6b78">t=3</text>
+  <text x="20" y="565" class="m3-txt" font-size="9" fill="#6b6b78">t=4</text>
+  <text x="20" y="665" class="m3-txt" font-size="9" fill="#6b6b78">t=5</text>
+  <text x="20" y="785" class="m3-txt" font-size="9" fill="#6b6b78">t=6</text>
+  <text x="20" y="895" class="m3-txt" font-size="9" fill="#6b6b78">t=7</text>
+  <text x="20" y="985" class="m3-txt" font-size="9" fill="#6b6b78">t=8</text>
+
+  <!-- 阶段汇总箭头（纵向）-->
+  <line x1="380" y1="415" x2="380" y2="425" stroke="#6b6b78" marker-end="url(#m3-arr)"/>
+  <line x1="380" y1="515" x2="380" y2="525" stroke="#6b6b78" marker-end="url(#m3-arr)"/>
+  <line x1="380" y1="605" x2="380" y2="615" stroke="#6b6b78" marker-end="url(#m3-arr)"/>
+  <line x1="380" y1="715" x2="380" y2="855" stroke="#6b6b78" stroke-dasharray="3 3" marker-end="url(#m3-arr)"/>
+  <line x1="380" y1="935" x2="380" y2="945" stroke="#6b6b78" marker-end="url(#m3-arr)"/>
+
+  <!-- 图例 -->
+  <rect x="40" y="1050" width="990" height="40" rx="4" fill="#fafaff" stroke="#e3e3ea"/>
+  <text x="50" y="1070" class="m3-txt" font-size="10" font-weight="700">图例：</text>
+  <line x1="100" y1="1067" x2="120" y2="1067" stroke="#6c4cf5" stroke-width="2" marker-end="url(#m3-arr-u)"/>
+  <text x="130" y="1071" class="m3-txt" font-size="10" fill="#6c4cf5">用户态 ↔ 内核切换 (trap/sret)</text>
+  <line x1="330" y1="1067" x2="350" y2="1067" stroke="#ff8a3a" stroke-width="2" marker-end="url(#m3-arr)"/>
+  <text x="360" y="1071" class="m3-txt" font-size="10" fill="#ff8a3a">进程 ↔ 调度器切换 (swtch)</text>
+  <line x1="580" y1="1067" x2="600" y2="1067" stroke="#3aa0ff" stroke-width="2" marker-end="url(#m3-arr-k)"/>
+  <text x="610" y="1071" class="m3-txt" font-size="10" fill="#3aa0ff">调度器 → 进程 (swtch 切回)</text>
+  <line x1="830" y1="1067" x2="850" y2="1067" stroke="#6b6b78" stroke-width="2" stroke-dasharray="3 3" marker-end="url(#m3-arr)"/>
+  <text x="860" y="1071" class="m3-txt" font-size="10" fill="#6b6b78">异步返回路径</text>
+</svg>

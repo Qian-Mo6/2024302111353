@@ -1,14 +1,45 @@
 /*
- * lab1 初始骨架代码(自动生成): 系统启动与串口控制台输出。
- * 启动至此的前期初始化流程，需要由你在本实验中设计并实现。
- * 你需要实现: entry.S(start 前的 M 态准备可另置 start.c)、串口轮询输出、
- * 最小 printf。链接脚本 kernel.ld 带注释保留; 底层宏 riscv.h 完整保留。
- * 代码导读路线与设计引导问题详见《实验说明书(lab1)》。
+ * lab1 阶段四 · main.c：调用 printf 输出学号 Banner
  *
- * 两个环境注意事项(说明书 §2"环境前置条件"与附录 C, 动手前必读):
- *  1. start() 的 M→S 切换清单必须包含 PMP 配置(最简两行):
- *       w_pmpaddr0(0x3fffffffffffffull); w_pmpcfg0(0xf);
- *     否则在新版 QEMU 上 mret 进 S 态的第一条取指即触发 fault(全程无输出)。
- *  2. entry.S 里的陷阱向量标号前加 .balign 4(mtvec 要求 4 字节对齐,
- *     不满足时写入会被硬件静默丢弃)。
+ * 阶段四目标：用 printf 输出协议 0 Banner："2024302111353 0x2e\n"
+ *            （学号十进制 + 空格 + 0x + mod97 小写十六进制 + 换行）
+ *
+ * 学号 2024302111353：
+ *   - sid % 97 = 46
+ *   - sid % 3  = 0  → 协议 0（明文 + 换行）
+ *
+ * 验收：
+ *   1. make qemu 输出 "2024302111353 0x2e\n"（逐字节匹配 expect_banner.txt）
+ *   2. python3 check_expect.py 2024302111353 → [ok] 协议 0
  */
+
+#include "types.h"
+#include "riscv.h"
+
+/* 外部声明：console.c / printf.c 中定义 */
+void consoleinit(void);
+void printf(char *fmt, ...);
+
+/* 学号 + 协议参数（来自 kernel/course_sid.h）
+ * types.h 无 int64 typedef，用 long（RV64 上 8 字节，能装学号 2024302111353） */
+#define SID      2024302111353L     /* 学号，L 后缀按 long 处理 */
+#define SID_MOD97 (SID % 97)        /* sid % 97 = 46 → 0x2e */
+
+void
+main(void)
+{
+    /* 阶段四：初始化控制台 + printf 输出 Banner */
+    consoleinit();
+
+    /* 协议 0：sid 十进制 + 空格 + 0x{mod97 小写十六进制} + 换行
+     * printf 里 %d 用 va_arg(long) 取参（学号超 int32）
+     * printf 里 %x 用 va_arg(uint64) 取参，自动加 0x 前缀
+     * 注意：格式串里不要再写 0x，%x 会自己加，否则输出 0x0x2e
+     */
+    printf("%d %x\n", (long)SID, (uint64)SID_MOD97);
+
+    /* 死循环等待——不返回到 mret 之外 */
+    while (1) {
+        ;
+    }
+}

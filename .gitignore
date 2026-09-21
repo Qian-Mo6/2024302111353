@@ -1,0 +1,6 @@
+# 编译产物
+kernel/*.o
+kernel/kernel
+int.log
+asm.log
+*.tmp
