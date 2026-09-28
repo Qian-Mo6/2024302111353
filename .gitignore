@@ -4,3 +4,8 @@ kernel/kernel
 int.log
 asm.log
 *.tmp
+
+# lab2 构建中间产物
+user-flat/
+kernel/userimg.S
+user/usys.S
