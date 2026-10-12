@@ -48,6 +48,7 @@ w_mepc(uint64 x)
 #define SSTATUS_SPP  (1L << 8) // Previous mode, 1=Supervisor, 0=User
 #define SSTATUS_SPIE (1L << 5) // Supervisor Previous Interrupt Enable
 #define SSTATUS_UPIE (1L << 4) // User Previous Interrupt Enable
+#define SSTATUS_SUM  (1L << 18) // Supervisor User Memory access
 #define SSTATUS_SIE  (1L << 1) // Supervisor Interrupt Enable
 #define SSTATUS_UIE  (1L << 0) // User Interrupt Enable
 
@@ -285,6 +286,21 @@ r_stval()
   return x;
 }
 
+// Supervisor Scratch Register
+static inline uint64
+r_sscratch()
+{
+  uint64 x;
+  asm volatile("csrr %0, sscratch" : "=r"(x));
+  return x;
+}
+
+static inline void
+w_sscratch(uint64 x)
+{
+  asm volatile("csrw sscratch, %0" : : "r"(x));
+}
+
 // Machine-mode Counter-Enable
 static inline void
 w_mcounteren(uint64 x)
@@ -419,3 +435,12 @@ typedef uint64 *pagetable_t; // 512 PTEs
 // Sv39, to avoid having to sign-extend virtual addresses
 // that have the high bit set.
 #define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
+
+/* ============ lab2 阶段一 · scause 值定义 ============ */
+#define SCAUSE_SYSCALL 8
+#define SCAUSE_INST_FETCH 1
+#define SCAUSE_ILLEGAL 2
+#define SCAUSE_LOAD_PAGE 13
+#define SCAUSE_STORE_PAGE 15
+#define SCAUSE_EXT_INTERRUPT  (1L << 63)
+#define SCAUSE_TIMER_INTERRUPT (1L << 63) + 5

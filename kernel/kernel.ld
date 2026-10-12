@@ -19,6 +19,7 @@ SECTIONS
 
   .text : {          /* 代码段:entry.S 的第一段指令就在这里开头 */
     *(.text .text.*)
+    *(trampsec)      /* lab2:trampoline.S 用 .section trampsec,需放进 RAM 内 */
   }
 
   .rodata : {        /* 只读数据:字符串常量等 */

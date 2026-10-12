@@ -26,7 +26,7 @@
  *   - 实际含义见 RISC-V Privileged ISA 3.7.1
  */
 #define PMP_ADDR_ALL  0x3fffffffffffffull
-#define PMP_CFG_ALL_RWX 0xf   /* L=0, A=TOR, X=1, W=1, R=1（位顺序 L|X|W|R|A|A */
+#define PMP_CFG_ALL_RWX 0x1f   /* L=0, A=TOR, X=1, W=1, R=1（位顺序 L|X|W|R|A|A */
 
 void
 start(void)

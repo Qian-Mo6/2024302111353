@@ -9,3 +9,5 @@ asm.log
 user-flat/
 kernel/userimg.S
 user/usys.S
+*.log
+lab2_int*.log

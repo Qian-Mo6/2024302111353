@@ -1,18 +1,33 @@
-# 赠送件 —— lab2 Makefile 升级件(不可改本文件的规则本身;
-# 合并方式:把下面全部规则并入你的 Makefile,并把 kernel/userimg.o
-# 加进你的 OBJS。三固定项(make kernel / make qemu / course_sid.h
-# 依赖)保持不变。
-# ⚠ 历史合并陷阱(已在本文件内修复,合并时整段照抄即可):
-#   1) OBJCOPY 变量:基线 Makefile 未定义,本文件已自带定义;
-#   2) UFLAGS 需含 -I. :用户程序 #include "kernel/types.h" 从树根解析。)
-#
-# 设计说明:lab2 阶段没有磁盘、没有文件系统(那是 lab6 的债)。
-# 用户程序由本规则链编译为平铺二进制,经 userimg.S 内嵌进内核镜像;
-# 你的 sys_exec 从内嵌程序表按名字查找并加载(表格式见下方注释)。
-
-UPROGS = sh hi spin
+# lab1 骨架 Makefile + lab2 升级规则(合并)
+CC   = riscv64-unknown-elf-gcc
+LD   = riscv64-unknown-elf-ld
+CFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding \
+         -nostdlib -fno-common -ggdb -march=rv64gc -fno-stack-protector -fno-pie
+QEMU = qemu-system-riscv64
 
 OBJCOPY ?= riscv64-unknown-elf-objcopy
+
+OBJS = kernel/entry.o kernel/start.o kernel/console.o kernel/printf.o kernel/main.o \
+       kernel/proc.o kernel/trap.o kernel/syscall.o kernel/vm.o kernel/trampoline.o kernel/userimg.o kernel/plic.o
+
+kernel/kernel: $(OBJS) kernel/kernel.ld
+	$(LD) -T kernel/kernel.ld -o $@ $(OBJS)
+
+%.o: %.c kernel/riscv.h kernel/course_sid.h
+	$(CC) $(CFLAGS) -Ikernel -c -o $@ $<
+
+%.o: %.S
+	$(CC) $(CFLAGS) -Ikernel -c -o $@ $<
+
+# 验收环境固定(排雷环节禁止改动本行以下内容)
+qemu: kernel/kernel
+	$(QEMU) -machine virt -bios none -kernel kernel/kernel -nographic
+
+clean:
+	rm -f kernel/*.o kernel/kernel
+
+# ============ lab2 升级规则 ============
+UPROGS = sh hi spin
 
 UFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding \
          -nostdlib -fno-common -ggdb -march=rv64gc \
