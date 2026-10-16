@@ -20,6 +20,9 @@
 static char page_pool[PAGE_POOL_PAGES * PGSIZE] __attribute__((aligned(PGSIZE)));
 static uint page_pool_idx = 0;
 
+/* 全局内核页表指针:Stage5 sys_exec 用它做 user_remap */
+static pagetable_t g_kpgtbl = 0;
+
 static void *kalloc_page(void) {
     if (page_pool_idx >= PAGE_POOL_PAGES)
         return 0;
@@ -65,6 +68,18 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
     }
 }
 
+/* user_remap:Stage5 sys_exec 用,在全局内核页表中重新映射某个用户 VA
+ * 直接覆盖原有 PTE(若已存在),无需先解除 — 适合同一 VA 的重映射 */
+void
+user_remap(uint64 va, uint64 pa, int perm)
+{
+    if (!g_kpgtbl) return;
+    pte_t *pte = walk(g_kpgtbl, va, 1);
+    if (!pte) return;
+    *pte = PA2PTE(pa) | perm | PTE_V;
+    sfence_vma();
+}
+
 /* kvminit:创建内核页表
  * - 恒等映射 RAM
  * - 映射 TRAMPOLINE → trampoline 代码物理页
@@ -90,8 +105,13 @@ kvminit(uint64 trampoline_pa, uint64 trapframe_pa, uint64 user_code_pa)
     mappages(kpgtbl, TRAMPOLINE, PGSIZE, trampoline_pa, PTE_R | PTE_X | PTE_A | PTE_D);
     mappages(kpgtbl, TRAPFRAME, PGSIZE, trapframe_pa, PTE_R | PTE_W | PTE_A | PTE_D);
 
-    /* 用户代码页:VA 0x0 → user_code_pa,需要 U 位供 U 态执行 */
-    mappages(kpgtbl, 0x0, PGSIZE, user_code_pa, PTE_R | PTE_X | PTE_U | PTE_A | PTE_D);
+    /* 用户代码页:VA 0x0 → user_code_pa,需要 U 位供 U 态执行
+     * Stage5: sys_exec 会用 user_remap 覆盖此映射以加载新程序 */
+    if (user_code_pa)
+        mappages(kpgtbl, 0x0, PGSIZE, user_code_pa, PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D);
+
+    /* 保存全局引用供 user_remap 使用 */
+    g_kpgtbl = kpgtbl;
 
     return kpgtbl;
 }

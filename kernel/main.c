@@ -1,9 +1,18 @@
-/* ============ lab2 阶段四 · 自测版 main.c ============
- * 阶段二:测试三个系统调用 write / getpid / exit
- * 阶段三:测试外部中断(用户输入字符 -> 内核回显)
- * 阶段四:测试 sys_read(从控制台读 + 回显)
- *         _user_test 打印消息后调 read 等用户输入,
- *         用户在 QEMU 敲键 -> sys_read 取字符 -> write 回显
+/* ============ lab2 阶段六 · fork/wait 自测版 main.c ============
+ * 阶段五:测试 sys_exec(_user_test 调 exec("hi",0) -> 加载 hi 程序)
+ * 阶段六:测试 sys_fork + sys_wait
+ *         _user_test 调 fork,子进程 exec("hi"),父进程 wait 回收
+ *
+ * 流程:
+ *   1. _user_test fork -> 切到子进程运行
+ *   2. 子进程 a0=0,跳 child 分支,exec("hi") 加载 hi 程序
+ *   3. hi 运行(getpid+printf+write),exit(0) -> 切回父进程
+ *   4. 父进程 fork 返回子pid,wait 回收子进程,exit(0)
+ *
+ * 期望输出:
+ *   hi: user program running, pid=2
+ *   user process exited with 0      (子进程 hi exit)
+ *   user process exited with 0      (父进程 exit)
  * ======================================== */
 #include "types.h"
 #include "riscv.h"
@@ -23,52 +32,33 @@ void kvminithart(pagetable_t kpgtbl);
 
 extern char trampoline[];
 
-/* 用户测试程序:write 打印消息,read 读输入,write 回显
+/* 初始用户程序:exec("sh", 0) 启动最小 shell
+ * sh 之后靠 fork/exec/wait/read/write 循环执行用户命令
  * 使用 PC 相对寻址(la 在 medany 模型下生成 auipc+addi)
- * 栈缓冲区用于存放 read 读取的数据 */
+ * 不需要栈 — exec 之前不调用任何需要栈的代码 */
 __asm__(
     ".global _user_test\n"
     "_user_test:\n"
-    "    # write(1, msg, 17) -> 打印 hello 消息\n"
-    "    li a7, 6\n"            /* SYS_write */
-    "    li a0, 1\n"            /* fd = stdout */
-    "    la a1, msg\n"          /* buf */
-    "    li a2, 17\n"           /* len */
+    "    # exec(\"sh\", 0) 加载并运行 sh\n"
+    "    li a7, 9\n"            /* SYS_exec */
+    "    la a0, name\n"         /* name 指向 "sh" */
+    "    li a1, 0\n"            /* argv = 0,lab2 忽略 */
     "    ecall\n"
-    "    # write(1, prompt, 6) -> 打印提示符\n"
-    "    li a7, 6\n"            /* SYS_write */
-    "    li a0, 1\n"
-    "    la a1, prompt\n"
-    "    li a2, 6\n"            /* len = \"echo> \" */
-    "    ecall\n"
-    "    # read(0, buf, 1) -> 从控制台读 1 个字符\n"
-    "    li a7, 5\n"            /* SYS_read */
-    "    li a0, 0\n"            /* fd = stdin */
-    "    addi a1, sp, -64\n"    /* buf = 栈上缓冲区 */
-    "    li a2, 1\n"            /* n = 1 */
-    "    ecall\n"
-    "    # write(1, buf, 1) -> 回显读取的字符\n"
-    "    li a7, 6\n"            /* SYS_write */
-    "    li a0, 1\n"
-    "    addi a1, sp, -64\n"    /* buf */
-    "    li a2, 1\n"            /* len = 1 */
-    "    ecall\n"
-    "    # exit(0)\n"
+    "    # exec 不应返回;失败则 exit(1)\n"
     "    li a7, 2\n"            /* SYS_exit */
-    "    li a0, 0\n"
+    "    li a0, 1\n"
     "    ecall\n"
-    "    j .\n"                  /* 安全兜底 */
-    "msg:\n"
-    "    .asciz \"hello from user!\\n\"\n"
-    "prompt:\n"
-    "    .asciz \"echo> \"\n"
+    "    j .\n"
+    "\n"
+    "name:\n"
+    "    .asciz \"sh\"\n"
 );
 
 void
 main(void)
 {
     consoleinit();
-    printf("=== lab2 stage4 self-test ===\n");
+    printf("=== lab2 stage7: run sh ===\n");
 
     plicinit();
     printf("plic inited (UART0 IRQ=%d enabled)\n", UART0_IRQ);
@@ -82,12 +72,21 @@ main(void)
     extern struct proc *curproc;
     curproc = p;
 
-    uint64 user_code_pa = PGROUNDDOWN((uint64)_user_test);
+    /* 把内核 _user_test 所在页复制到 p->prog_page,作为初始用户程序
+     * 使 VA 0x0 始终映射到进程自己的 prog_page,与 exec/fork 语义一致 */
+    uint64 code_page = PGROUNDDOWN((uint64)_user_test);
+    for (int i = 0; i < PGSIZE; i++)
+        p->prog_page[i] = ((char *)code_page)[i];
+
+    uint64 user_code_pa = (uint64)p->prog_page;
     uint64 trampoline_pa = PGROUNDDOWN((uint64)trampoline);
     uint64 trapframe_pa  = (uint64)p->trapframe;
 
-    p->trapframe->epc = (uint64)_user_test - user_code_pa;
-    p->trapframe->sp  = 0x80000000 + 1024 * 1024;
+    /* _user_test 入口 = 页内偏移(VA 0x0 起始)
+     * sys_exec/sys_fork 会用 user_remap 重新映射 VA 0x0/0x1000 */
+    p->trapframe->epc = (uint64)_user_test - code_page;
+    /* sp=0x2000:栈顶,sys_exec 会映射 VA 0x1000 → 栈页 */
+    p->trapframe->sp  = 0x2000;
 
     printf("user_epc=%x trampoline=%x tf=%x\n",
            p->trapframe->epc, trampoline_pa, trapframe_pa);
@@ -100,7 +99,7 @@ main(void)
     w_sstatus(r_sstatus() | SSTATUS_SUM);
 
     printf("satp OK, going to U mode...\n");
-    printf("type something then Enter to test read/write\n");
+    printf("_user_test: exec(\"sh\", 0) -> shell\n");
 
     usertrapret();
 
