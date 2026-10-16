@@ -15,6 +15,14 @@
 
 #include "types.h"
 #include "riscv.h"
+#include "course_sid.h"   /* 缓冲区大小取 LAB2_BUF_SIZE */
+
+/* PLIC 接口(plic.c):轮询路径直接消费 UART 字节后,必须从 PLIC 认领并
+ * 完结该外部中断,否则会残留一个待处理中断(SEIP),等回到用户态
+ * 重新开中断时被误触发 —— uartintr 再读一次已空的 RBR,产生幽灵字符。
+ * 认领/完结构成"中断已处理"的语义,与 traps→devintr 路径一致。 */
+int  plic_claim(void);
+void plic_complete(int irq);
 
 /* UART 16550 寄存器(QEMU virt 平台固定 MMIO 地址) */
 #define UART0     0x10000000    /* 数据寄存器 RBR/THR */
@@ -35,7 +43,7 @@ static volatile uint8 *const uart_lsr = (uint8 *)UART_LSR;
  * 环形缓冲区:uartintr 写入,consoleread 读出
  * lab2 无锁(单核,中断在 S 态被硬件关闭,无并发)
  * ======================================== */
-#define CONS_BUF_SIZE 128
+#define CONS_BUF_SIZE LAB2_BUF_SIZE  /* = 64,来自 course_sid.h 的个性化参数 */
 static char cons_buf[CONS_BUF_SIZE];  /* 环形缓冲区 */
 static int cons_r = 0;                 /* 读指针 */
 static int cons_w = 0;                 /* 写指针 */
@@ -98,56 +106,71 @@ consputc(char c)
     uartputc_sync(c);
 }
 
-/* uartintr:UART 接收中断处理
- * 读 RBR 拿到用户输入的字符,存入缓冲区并回显
- * 读 RBR 同时会清除 UART 的 RX 中断标志位 */
+/* ============ UART 接收字符的统一入口 ============
+ * 归一化行结束(\r -> \n;CRLF 折叠为单个 \n),再存入环形缓冲区并回显。
+ * uartintr(中断路径)与 consoleread(轮询路径)共用,保证两条路径
+ * 对输入的解析完全一致。 */
+static int rx_last_was_cr = 0;   /* 上一字节是否为 CR,用于折叠 CRLF */
+
+static void
+cons_rx_store(char c)
+{
+    if (c == '\r') {
+        c = '\n';
+        rx_last_was_cr = 1;
+    } else if (c == '\n' && rx_last_was_cr) {
+        rx_last_was_cr = 0;
+        return;                   /* CRLF 的第二字节,忽略 */
+    } else {
+        rx_last_was_cr = 0;
+    }
+
+    cons_putc_to_buf(c);          /* 存入环形缓冲区(供 consoleread 取用) */
+    consputc(c);                  /* 回显:让用户看到自己输入的字符 */
+}
+
+/* uartintr:UART 接收中断处理 —— 读 RBR(同时清除 RX 中断)交给统一入口 */
 void
 uartintr(void)
 {
-    /* 读 RBR 拿字符,同时清除 UART 的 RX 中断 */
-    char c = (char)*uart_thr;
-
-    /* 简化:回车符 \r 转换为换行 \n 便于显示 */
-    if (c == '\r') c = '\n';
-
-    /* 存入环形缓冲区(供 consoleread 取用) */
-    cons_putc_to_buf(c);
-
-    /* 回显:让用户看到自己输入的字符 */
-    consputc(c);
+    cons_rx_store((char)*uart_thr);
 }
 
-/* consoleread:从控制台读 n 个字节到 user_dst
+/* consoleread:从控制台读最多 n 个字节到 user_dst
  * lab2 简化:内核与用户共用页表,可直接写入用户地址(lab3 改 copyout)
- * 流程:
- *   1. 先从环形缓冲区取(中断路径已存入并回显的字符)
- *   2. 缓冲区空则轮询 UART 直接取(并回显)
- * 返回实际读取的字节数 */
+ *
+ * LAB2_BUF_SEMANTICS = 1(字符流):缓冲区按字符队列组织,交付规则 ——
+ * 逐个交出已到达的字节,遇到 '\n'(行结束)或达到调用方限额 n 时返回:
+ *   - sh 用 n=1 逐字符取(gets 语义);
+ *   - bufstorm 用大 n 每次取回一整行(不会阻塞等满 n 个字节)。
+ * 字符来源:优先取环形缓冲区(uartintr 已存并回显);缓冲区空时轮询
+ * UART,把到达的字节经同一归一化入口 cons_rx_store 入缓冲后再取,
+ * 使中断路径与轮询路径行为一致。返回实际读取的字节数 */
 int
 consoleread(char *user_dst, int n)
 {
     int i;
     for (i = 0; i < n; i++) {
-        char c;
+        int ch;
 
-        /* 1. 先从缓冲区取 */
-        int ch = cons_getc_from_buf();
-        if (ch >= 0) {
-            c = (char)ch;
-            /* 中断路径已在 uartintr 中回显,此处不再回显 */
-        } else {
-            /* 2. 缓冲区空,轮询 UART 直接取 */
-            while ((*uart_lsr & LSR_RX_READY) == 0) {
-                /* 忙等:用户尚未输入 */
+        /* 等待一个已归一化的字符进入缓冲区 */
+        while ((ch = cons_getc_from_buf()) < 0) {
+            if (*uart_lsr & LSR_RX_READY) {
+                cons_rx_store((char)*uart_thr);   /* 轮询路径入缓冲 */
+                int irq = plic_claim();           /* 清掉残留的 PLIC 待处理中断 */
+                if (irq)
+                    plic_complete(irq);
             }
-            c = (char)*uart_thr;
-            /* 轮询路径:回显(未经过 uartintr) */
-            if (c == '\r') c = '\n';
-            consputc(c);
         }
 
         /* 写入用户缓冲区(lab2 直址,lab3 改 copyout) */
-        user_dst[i] = c;
+        user_dst[i] = (char)ch;
+
+        /* 行结束:把这一行交付给调用方后返回 */
+        if ((char)ch == '\n') {
+            i++;
+            break;
+        }
     }
     return i;
 }

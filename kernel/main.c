@@ -18,6 +18,7 @@
 #include "riscv.h"
 #include "proc.h"
 #include "memlayout.h"
+#include "course_sid.h"   /* 学号与个性化参数(COURSE_SID / LAB2_BUF_SIZE 等) */
 
 void consoleinit(void);
 void plicinit(void);
@@ -58,6 +59,10 @@ void
 main(void)
 {
     consoleinit();
+
+    /* lab1 回归:启动首行打印 banner(协议 0:明文 + 换行)
+     * 内容 = 学号十进制 + (学号 % 97) 的小写十六进制,如 "2024302111353 0x2e" */
+    printf("%d %x\n", (long)COURSE_SID, (uint64)(COURSE_SID % 97));
     printf("=== lab2 stage7: run sh ===\n");
 
     plicinit();

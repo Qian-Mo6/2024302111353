@@ -27,7 +27,7 @@ clean:
 	rm -f kernel/*.o kernel/kernel
 
 # ============ lab2 升级规则 ============
-UPROGS = sh hi spin
+UPROGS = sh hi spin badecall bufstorm
 
 UFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding \
          -nostdlib -fno-common -ggdb -march=rv64gc \
