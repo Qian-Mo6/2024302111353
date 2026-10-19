@@ -27,7 +27,8 @@ clean:
 	rm -f kernel/*.o kernel/kernel
 
 # ============ lab2 升级规则 ============
-UPROGS = sh hi spin badecall bufstorm
+# lab3: 追加官方测试 badaccess(越界终止) 与 memcap(内存上限/OOM)
+UPROGS = sh hi spin badecall bufstorm badaccess memcap
 
 UFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding \
          -nostdlib -fno-common -ggdb -march=rv64gc \

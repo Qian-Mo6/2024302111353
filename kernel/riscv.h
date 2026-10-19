@@ -2,6 +2,15 @@
  * 说明: RISC-V CSR 名与读写指令(环境事实)
  * 修改该支撑代码可能破坏统一接口规范；若遇到问题建议通过 git diff 核对本段代码。
  * ======================================== */
+/* [lab3 增量包 v2 修复覆盖] 补 include guard(防重复包含保护)。基线版本无
+ * guard,lab1/lab2 的使用方式未暴露;lab3 的进程结构头文件需引用本文件中的
+ * pte_t/pagetable_t 类型,与其他文件的直接包含叠加会产生重复定义错误。
+ * 本修复不改变任何宏、函数与语义。
+ * 合并说明:gift 版基于基线包,本工程另含 lab2 自加的 SSTATUS_SUM、
+ * r_sscratch/w_sscratch、SCAUSE_* 定义,故采用合并而非整体覆盖。 */
+#ifndef RISCV_H
+#define RISCV_H
+
 #ifndef __ASSEMBLER__
 
 // which hart (core) is this?
@@ -444,3 +453,5 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define SCAUSE_STORE_PAGE 15
 #define SCAUSE_EXT_INTERRUPT  (1L << 63)
 #define SCAUSE_TIMER_INTERRUPT (1L << 63) + 5
+
+#endif // RISCV_H

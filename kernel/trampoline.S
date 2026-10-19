@@ -13,7 +13,14 @@
 #include "riscv.h"
 #include "memlayout.h"
 
-.section trampsec
+# [lab3 增量包 v2 修复覆盖] 段声明由 .section trampsec 改为携带 "ax"(可分配
+# 可执行)属性,并在段首增加 .align 12(4KB 对齐)。原声明生成的段无
+# SHF_ALLOC/SHF_EXECINSTR 标志:链接后不进入任何可加载段(符号地址为 0),
+# lab3 启用 uservec/userret 时首次陷入将跳转 0 地址。参考库 xv6 依靠其
+# kernel.ld 的 *(trampsec) 收集规则规避,本课程预置 kernel.ld 无该规则,
+# 故在此修复。段对齐保证跳板页满足页表整页映射前提。
+.section trampsec, "ax"
+.align 12
 .globl trampoline
 .globl usertrap
 trampoline:
