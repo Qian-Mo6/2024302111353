@@ -19,6 +19,11 @@
 #include "proc.h"
 #include "memlayout.h"
 #include "course_sid.h"   /* 学号与个性化参数(COURSE_SID / LAB2_BUF_SIZE 等) */
+#include "vm.h"           /* lab3:kinit/kalloc/kfree 接口 */
+
+/* lab3 阶段一临时验证开关:1=上电自检物理页分配器。
+ * 已验证 PASS(对齐/升序/清零/守恒/触顶 32107 次后返回 0),正式构建置 0。 */
+#define LAB3_KALLOC_SELFTEST 0
 
 void consoleinit(void);
 void plicinit(void);
@@ -63,6 +68,54 @@ main(void)
     /* lab1 回归:启动首行打印 banner(协议 0:明文 + 换行)
      * 内容 = 学号十进制 + (学号 % 97) 的小写十六进制,如 "2024302111353 0x2e" */
     printf("%d %x\n", (long)COURSE_SID, (uint64)(COURSE_SID % 97));
+
+    /* lab3 阶段一:物理页分配器初始化(位图,升序,配额=总页数-LAB3_MEMCAP_DELTA) */
+    kinit();
+
+#if LAB3_KALLOC_SELFTEST
+    /* 阶段一临时验证(验证通过后把上面的宏置 0):
+     *   1) 分配 3 页:4KB 对齐、严格升序、内容已清零;
+     *   2) 释放中间页再分配:升序语义下应重新拿到该最低空闲页;
+     *   3) 计数守恒:全部释放后 used 回到基线;
+     *   4) 耗尽:持续分配恰好在 cap 次后返回 0,且内核不 panic;
+     *      随后全部释放,used 再次守恒。 */
+    {
+        int ok = 1;
+        uint64 baseline = kpages_used();
+
+        char *p1 = kalloc(), *p2 = kalloc(), *p3 = kalloc();
+        if (!p1 || !p2 || !p3) ok = 0;
+        if (ok && (((uint64)p1 & 0xFFF) || ((uint64)p2 & 0xFFF) || ((uint64)p3 & 0xFFF)))
+            ok = 0;                                  /* 对齐 */
+        if (ok && !(p1 < p2 && p2 < p3))
+            ok = 0;                                  /* 升序 */
+        if (ok)
+            for (int i = 0; i < PGSIZE; i++)
+                if (p1[i] || p2[i] || p3[i]) { ok = 0; break; }   /* 清零 */
+
+        kfree(p2);
+        char *p4 = kalloc();
+        if (p4 != p2) ok = 0;                        /* 升序:重发最低空闲页 */
+
+        kfree(p1); kfree(p3); kfree(p4);
+        if (kpages_used() != baseline) ok = 0;       /* 守恒 */
+
+        static void *hold[(PHYSTOP - KERNBASE) / PGSIZE];
+        uint64 n = 0;
+        void *q;
+        while ((q = kalloc()) != 0)
+            hold[n++] = q;
+        if (n != kpages_cap()) ok = 0;               /* 恰好触顶 */
+        if (kalloc() != 0) ok = 0;                   /* 触顶后仍返回 0 */
+        while (n > 0)
+            kfree(hold[--n]);
+        if (kpages_used() != baseline) ok = 0;       /* 再次守恒 */
+
+        printf("kalloc selftest: %s (cap=%d)\n", ok ? "PASS" : "FAIL", kpages_cap());
+        if (!ok) { intr_off(); while (1) {} }
+    }
+#endif
+
     printf("=== lab2 stage7: run sh ===\n");
 
     plicinit();
