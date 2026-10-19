@@ -13,9 +13,10 @@
 #include "memlayout.h"
 #include "syscall.h"
 
-/* trampoline.S 中定义的符号 */
+/* trampoline.S / kernelvec.S 中定义的符号 */
 extern void uservec(void);
 extern void userret(void);
+extern void kernelvec(void);
 extern char trampoline[];
 void usertrapret(void);
 
@@ -50,12 +51,52 @@ devintr(void)
     return 1;
 }
 
+/* kerneltrap:内核态(S 态)陷入处理,经 kernelvec.S 进入
+ * 外部中断:直接 devintr 分发(irq=0 为伪中断,devintr 返 0,忽略);
+ * 时钟中断:lab4 处理(本内核经 rdtime/stimecmp CSR,不访问 CLINT);
+ * 其余为内核异常:打印现场后停机(内核 bug)。
+ * 注意恢复 sepc/sstatus:处理路径若发生嵌套陷入会覆盖这两个 CSR。 */
+void
+kerneltrap(void)
+{
+    uint64 sepc    = r_sepc();
+    uint64 sstatus = r_sstatus();
+    uint64 scause  = r_scause();
+
+    if ((sstatus & SSTATUS_SPP) == 0) {
+        printf("kerneltrap: not from S-mode scause=%x\n", scause);
+        intr_off();
+        for (;;) { }
+    }
+
+    if (scause == SCAUSE_TIMER_INTERRUPT) {
+        /* 时钟中断:lab4 处理 */
+    } else if (scause & SCAUSE_EXT_INTERRUPT) {
+        devintr();
+    } else {
+        printf("kerneltrap: unexpected scause=%x sepc=%x stval=%x\n",
+               scause, sepc, r_stval());
+        intr_off();
+        for (;;) { }
+    }
+
+    w_sepc(sepc);
+    w_sstatus(sstatus);
+}
+
 /* usertrap:U 态陷入的 C 分发入口 */
 void
 usertrap(void)
 {
     struct proc *p = myproc();
     uint64 scause = r_scause();
+
+    /* stvec 切换协议(lab3 §2.2):预置 uservec 只切 satp、不切 stvec,
+     * 故进入陷入处理函数的第一件事是把 stvec 切回内核向量 kernelvec;
+     * 返回用户态前(usertrapret)再切回 uservec。
+     * 若遗漏:内核执行期间到达的中断会再进 uservec,在内核页表下
+     * 按用户语义向 TRAPFRAME 保存现场,引发无法恢复的异常风暴。 */
+    w_stvec((uint64)kernelvec);
 
     if (scause == SCAUSE_SYSCALL) {
         p->trapframe->epc = r_sepc() + 4;

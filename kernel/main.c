@@ -29,11 +29,17 @@
  * 已验证 PASS(map+walk / 回滚守恒 / unmap+prune),正式构建置 0。 */
 #define LAB3_VM_SELFTEST 0
 
+/* lab3 阶段三临时验证开关:1=上电自检内核页表(恒等映射/外设/跳板)与 stvec。
+ * 已验证 PASS(恒等映射精确至 PHYSTOP / 外设与跳板权限 / stvec=kernelvec /
+ * satp 后恒等映射可读写),正式构建置 0。 */
+#define LAB3_KVM_SELFTEST 0
+
 void consoleinit(void);
 void plicinit(void);
 void printf(char *fmt, ...);
 void usertrapret(void);
 struct proc *myproc(void);
+extern void kernelvec(void);
 
 extern char _user_test[];
 
@@ -68,6 +74,11 @@ void
 main(void)
 {
     consoleinit();
+
+    /* stvec 切换协议(lab3 §2.2):内核执行期间 stvec 一律指向 kernelvec;
+     * 仅 usertrapret 返回用户态前才切到 uservec。
+     * 尽早设置:此后 S 态任何陷入都进 kerneltrap 而非跳 0 地址。 */
+    w_stvec((uint64)kernelvec);
 
     /* lab1 回归:启动首行打印 banner(协议 0:明文 + 换行)
      * 内容 = 学号十进制 + (学号 % 97) 的小写十六进制,如 "2024302111353 0x2e" */
@@ -236,6 +247,56 @@ main(void)
     printf("kpgtbl=%x, switching satp...\n", (uint64)kpgtbl);
 
     kvminithart(kpgtbl);
+
+#if LAB3_KVM_SELFTEST
+    /* 阶段三临时验证(验证通过后把上面的宏置 0):
+     * ① 恒等映射精确到 PHYSTOP:root[2] 是非叶子中间项(不再是 1GB 超级页),
+     *    L1[0]/L1[63] 为 2MB 超级页叶子且 PA/权限正确,L1[64](PHYSTOP 起)无效;
+     * ② UART / PLIC(SCLAIM 页)/ TRAMPOLINE / TRAPFRAME 映射与权限;
+     * ③ stvec 在内核态指向 kernelvec;
+     * ④ satp 切换后恒等映射下新 kalloc 页可读写。 */
+    {
+        int ok = 1;
+        pte_t *r2 = walklevel(kpgtbl, KERNBASE, 2);
+        if (!r2 || (*r2 & PTE_V) == 0) ok = 0;
+        if (r2 && (*r2 & (PTE_R | PTE_W | PTE_X))) ok = 0;    /* 非叶子 */
+
+        pte_t *l1a = walklevel(kpgtbl, KERNBASE, 1);
+        pte_t *l1b = walklevel(kpgtbl, PHYSTOP - PGSIZE, 1);
+        pte_t *l1c = walklevel(kpgtbl, PHYSTOP, 1);
+        uint64 rwxv = PTE_R | PTE_W | PTE_X | PTE_V;
+        if (!l1a || PTE2PA(*l1a) != KERNBASE) ok = 0;
+        if (l1a && (*l1a & rwxv) != rwxv) ok = 0;
+        if (!l1b || PTE2PA(*l1b) != PHYSTOP - 0x200000) ok = 0;  /* 末 2MB 槽 */
+        if (l1c && (*l1c & PTE_V)) ok = 0;                       /* PHYSTOP 之外无映射 */
+
+        pte_t *eu = walk(kpgtbl, UART0, 0);
+        if (!eu || (*eu & PTE_V) == 0 || PTE2PA(*eu) != UART0) ok = 0;
+        if (eu && (*eu & (PTE_R | PTE_W)) != (PTE_R | PTE_W)) ok = 0;
+        pte_t *ep = walk(kpgtbl, PLIC + 0x201004, 0);            /* SCLAIM 所在 */
+        if (!ep || (*ep & PTE_V) == 0) ok = 0;
+        pte_t *et = walk(kpgtbl, TRAMPOLINE, 0);
+        if (!et || PTE2PA(*et) != trampoline_pa) ok = 0;
+        if (et && (*et & (PTE_R | PTE_X)) != (PTE_R | PTE_X)) ok = 0;
+        pte_t *ef = walk(kpgtbl, TRAPFRAME, 0);
+        if (!ef || PTE2PA(*ef) != trapframe_pa) ok = 0;
+        if (ef && (*ef & (PTE_R | PTE_W)) != (PTE_R | PTE_W)) ok = 0;
+
+        if (r_stvec() != (uint64)kernelvec) ok = 0;              /* stvec 协议 */
+
+        char *pg = (char *)kalloc();
+        if (!pg) ok = 0;
+        if (pg) {
+            pg[0] = 0x5A;
+            pg[PGSIZE - 1] = 0xA5;
+            if (pg[0] != 0x5A || pg[PGSIZE - 1] != (char)0xA5) ok = 0;
+            kfree(pg);
+        }
+
+        printf("kvm selftest: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+    }
+#endif
 
     w_sstatus(r_sstatus() | SSTATUS_SUM);
 

@@ -194,10 +194,23 @@ user_remap(uint64 va, uint64 pa, int perm)
 }
 
 /* kvminit:创建内核页表
- * - 1GB superpage 恒等映射 RAM(0x80000000~0xBFFFFFFF)
- * - 映射 UART / PLIC(外设必需)
- * - 映射 TRAMPOLINE / TRAPFRAME(高地址)
- * - 可选映射首个用户程序 VA 0x0(user_remap 会覆盖)
+ * - 恒等映射全部可用 RAM [KERNBASE, PHYSTOP):
+ *   64 个 2MB 超级页叶子挂在 root[2] 下的 L1 表。
+ *   不再用 lab2 的 1GB 超级页(会映射越出 PHYSTOP 至 0xBFFFFFFF)。
+ *   权限统一 RWX 是阶段三过渡方案;段级权限(内核 text RX、rodata R)
+ *   的细化留待后续阶段,在设计笔记中说明。
+ *   不变式:内核必须经恒等映射直接读写一切"分配出去"的物理页
+ *   (页表页、用户数据页、受控拷贝的物理中转)。
+ * - 外设必需映射:UART(串口寄存器)、PLIC(claim/complete)。
+ *   CLINT 不映射:本内核时钟访问经 rdtime/stimecmp CSR(Sstc 扩展)
+ *   进行,不读写 CLINT MMIO 寄存器——保持最小映射面,设计笔记中说明。
+ * - TRAMPOLINE 映射在最高地址:跳板页必须与用户页表同址,
+ *   uservec/userret 切 satp 前后指令流才能不断档。
+ * - TRAPFRAME / 可选的首个用户程序 VA 0x0(user_remap 会覆盖)。
+ *
+ * sfence.vma 时机:本函数只建表不刷 TLB;刷 TLB 由各切换点负责——
+ *   kvminithart 写 satp 后、uservec/userret 换页表前后(trampoline
+ *   预置)、user_remap 改 PTE 后。批量建映射由调用方统一刷,避免逐页刷。
  * 任一步失败说明早期内存不足,直接 panic。 */
 pagetable_t
 kvminit(uint64 trampoline_pa, uint64 trapframe_pa, uint64 user_code_pa)
@@ -206,9 +219,13 @@ kvminit(uint64 trampoline_pa, uint64 trapframe_pa, uint64 user_code_pa)
     if (!kpgtbl)
         vm_panic("kvminit: no root page");
 
-    /* 用 1GB superpage 映射 0x80000000~0xBFFFFFFF
-     * 0x80000000 是 1GB 对齐,可以直接在 L2 放叶子 PTE */
-    kpgtbl[2] = PA2PTE(KERNBASE) | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | PTE_V;
+    /* 恒等映射 [KERNBASE, PHYSTOP):root[2] -> L1 表,64 个 2MB 超级页 */
+    pagetable_t l1ram = (pagetable_t)kalloc();
+    if (!l1ram)
+        vm_panic("kvminit: no RAM L1 page");
+    kpgtbl[2] = PA2PTE((uint64)l1ram) | PTE_V;
+    for (uint64 pa = KERNBASE; pa < PHYSTOP; pa += SZ_2MB)
+        l1ram[PX(1, pa)] = PA2PTE(pa) | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | PTE_V;
 
     /* UART 映射(printf 需要) */
     if (mappages(kpgtbl, UART0, PGSIZE, UART0, PTE_R | PTE_W | PTE_A | PTE_D) != 0)
