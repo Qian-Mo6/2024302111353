@@ -2,28 +2,27 @@
  * 由 usertrap() 调用,根据 trapframe->a7 分发到对应处理函数
  * 约定:a7=调用号,a0~a2=参数,返回值写入 trapframe->a0
  *
- * 阶段二实现:getpid / write / exit
- * 阶段四实现:read (从控制台缓冲区读)
- * 阶段五实现:exec (从内嵌程序表 _uprog_table 加载程序)
- * 阶段六实现:fork / wait (进程创建与回收)
- * 未实现的调用号统一返回 -1 (M3 要求:不死机)
+ * lab3 阶段四改造:
+ *   - 用户指针一律经 copyin/copyout/copyinstr 受控拷贝,
+ *     内核不再直接解引用用户地址(独立用户页表后直址即缺页);
+ *   - sys_exec 构建全新地址空间(uvmcreate+uvmload),全部映射成功后
+ *     才 uvmfree 旧空间;任一失败保留旧空间,进程可继续运行;
+ *   - sys_wait 回写子进程退出状态;sys_exit 与异常被杀共用 exit_current。
  * ======================================== */
 #include "types.h"
 #include "riscv.h"
 #include "memlayout.h"
 #include "proc.h"
 #include "syscall.h"
+#include "vm.h"
 
-/* lab2 简化:QEMU 需要 A/D 位(riscv.h 未定义,与 vm.c 保持一致) */
+/* QEMU 需要 A/D 位(riscv.h 未定义,与 vm.c 保持一致) */
 #define PTE_A (1L << 6)
 #define PTE_D (1L << 7)
 
 void consputc(char c);
-int  consoleread(char *user_dst, int n);
+int  consoleread(char *kbuf, int n);   /* 读入内核缓冲区,由 sys_read copyout */
 void printf(char *fmt, ...);
-
-/* user_remap:在全局内核页表中重新映射 VA(定义在 vm.c) */
-void user_remap(uint64 va, uint64 pa, int perm);
 
 /* sys_getpid:返回当前进程 pid */
 static uint64
@@ -33,102 +32,100 @@ sys_getpid(void)
 }
 
 /* sys_write(fd, buf, len):将用户缓冲区写入文件描述符
- * lab2 只支持 fd=1 (stdout)
- * 简化:内核和用户共用页表,可直接访问用户地址(lab3 改 copyin) */
+ * 只支持 fd=1 (stdout)。用户缓冲区经 copyin 分块拷入内核后输出。 */
 static uint64
 sys_write(void)
 {
     struct proc *p = myproc();
     int fd = p->trapframe->a0;
-    char *buf = (char *)p->trapframe->a1;
-    int len = p->trapframe->a2;
+    uint64 buf = p->trapframe->a1;
+    int len = (int)p->trapframe->a2;
 
-    if (fd != 1)
+    if (fd != 1 || len < 0)
         return -1;
 
-    for (int i = 0; i < len; i++)
-        consputc(buf[i]);
-
+    char kbuf[128];
+    int off = 0;
+    while (off < len) {
+        int n = len - off;
+        if (n > (int)sizeof(kbuf)) n = (int)sizeof(kbuf);
+        if (copyin(p->pagetable, kbuf, buf + off, (uint64)n) < 0)
+            return -1;
+        for (int i = 0; i < n; i++)
+            consputc(kbuf[i]);
+        off += n;
+    }
     return len;
 }
 
 /* sys_read(fd, buf, n):从文件描述符读 n 字节到用户缓冲区
- * lab2 只支持 fd=0 (stdin) → consoleread
- * 简化:内核和用户共用页表,可直接写入用户地址(lab3 改 copyout) */
+ * 只支持 fd=0 (stdin):consoleread 读入内核缓冲区,再 copyout 给用户。
+ * read 允许短读:单次最多交付 sizeof(kbuf) 字节。 */
 static uint64
 sys_read(void)
 {
     struct proc *p = myproc();
     int fd = p->trapframe->a0;
-    char *buf = (char *)p->trapframe->a1;
-    int n = p->trapframe->a2;
+    uint64 buf = p->trapframe->a1;
+    int n = (int)p->trapframe->a2;
 
-    if (fd != 0)
+    if (fd != 0 || n < 0)
         return -1;
 
-    return consoleread(buf, n);
+    char kbuf[64];
+    int m = n > (int)sizeof(kbuf) ? (int)sizeof(kbuf) : n;
+    int r = consoleread(kbuf, m);
+    if (r > 0 && copyout(p->pagetable, buf, kbuf, (uint64)r) < 0)
+        return -1;
+    return r;
 }
 
 /* sys_exit(status):退出当前进程
- * lab2 简化:标记 ZOMBIE 后切回父进程(若有),否则停机
- * Stage6: 切回父进程时需恢复父进程的 VA 0x0/0x1000 映射 */
+ * 标 ZOMBIE 后切回父进程(若有),状态留给 wait 回写 */
 static uint64
 sys_exit(void)
 {
     struct proc *p = myproc();
-    int status = p->trapframe->a0;
+    int status = (int)p->trapframe->a0;
 
     printf("user process exited with %d\n", status);
-
-    /* 标记 ZOMBIE (wait 时 freeproc) */
-    p->state = ZOMBIE;
-
-    /* 切回父进程:恢复父进程的 VA 映射,并把 TRAPFRAME 映射回父进程 */
-    if (p->parent) {
-        user_remap(0x0,    (uint64)p->parent->prog_page,
-                   PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D);
-        user_remap(0x1000, (uint64)p->parent->stack_page,
-                   PTE_R | PTE_W | PTE_U | PTE_A | PTE_D);
-        user_remap(TRAPFRAME, (uint64)p->parent->trapframe, PTE_R | PTE_W);
-        extern struct proc *curproc;
-        curproc = p->parent;
-    } else {
-        /* 初始进程 exit:无父进程,停机(lab4 改走调度器) */
-        for (;;) { }
-    }
+    exit_current(status);
     return 0;  /* 不会返回(curproc 已切到父进程) */
 }
 
 /* sys_exec(name, argv):从内嵌程序表 _uprog_table 加载程序
- *   a0 = name 指针(lab2 内核/用户共用页表,可直接读用户地址)
- *   a1 = argv (lab2 忽略,规格允许)
+ *   a0 = name 用户指针(copyinstr 受控拷入)
+ *   a1 = argv (忽略,规格允许)
  *
- * _uprog_table 布局(userimg.S 生成):
+ * _uprog_table 布局(userimg.S 生成,ABI 勿改):
  *   每项 = {u64 start; u64 end; char name[]; .balign 8; 二进制}
  *   以 {0, 0} 结尾
+ * _uprog_meta(构建期从 ELF 提取,与表项同序):
+ *   每项 = {u64 wstart; u64 memsz} —— .data 起始 VA(页对齐)与 end 符号,
+ *   用于区分代码/只读页(RXU,无 W)与数据/bss 页(RWU)。
  *
- * Stage6: 程序复制到当前进程的 prog_page(非全局),支持多进程独立 */
+ * 新地址空间全部构建成功后才释放旧空间;任一失败保留旧空间返回 -1。 */
 static uint64
 sys_exec(void)
 {
     struct proc *p = myproc();
-    char *name = (char *)p->trapframe->a0;
 
     /* argv 暂忽略(lab2 规格) */
 
-    /* sh 传入的一整行含结尾 '\n'(gets 不剥离),截到首个空白/换行 */
+    /* 受控拷入程序名,并截到首个空白/换行(sh 传入的一整行含 '\n') */
     char nbuf[64];
-    int nl = 0;
-    for (; nl < 63; nl++) {
-        char c = name[nl];
-        if (c == '\0' || c == '\n' || c == '\r' || c == ' ')
-            break;
-        nbuf[nl] = c;
+    if (copyinstr(p->pagetable, nbuf, p->trapframe->a0, sizeof(nbuf)) < 0)
+        return -1;
+    for (int i = 0; i < (int)sizeof(nbuf); i++) {
+        char c = nbuf[i];
+        if (c == '\n' || c == '\r' || c == ' ') { nbuf[i] = '\0'; break; }
+        if (c == '\0') break;
     }
-    nbuf[nl] = '\0';
 
     extern char _uprog_table[];
+    extern uint64 _uprog_meta[];
     uint64 cur = (uint64)_uprog_table;
+    int idx = 0;   /* 表项序号,与 _uprog_meta 同序 */
 
     while (1) {
         uint64 start = *(uint64 *)cur;
@@ -148,32 +145,40 @@ sys_exec(void)
         }
 
         if (match) {
-            uint64 sz = end - start;
-            if (sz > PGSIZE) return -1;
+            uint64 wstart = _uprog_meta[idx * 2];
+            uint64 memsz  = _uprog_meta[idx * 2 + 1];
 
-            /* 复制程序二进制到当前进程的 prog_page,剩余清零 */
-            char *src = (char *)start;
-            char *dst = p->prog_page;
-            for (uint64 i = 0; i < sz; i++)
-                dst[i] = src[i];
-            for (uint64 i = sz; i < PGSIZE; i++)
-                dst[i] = 0;
+            /* 构建全新地址空间:新页表 + TRAPFRAME + 代码/数据/保护页/栈 */
+            pagetable_t npt = uvmcreate();
+            if (!npt)
+                return -1;
+            if (mappages(npt, TRAPFRAME, PGSIZE, (uint64)p->trapframe,
+                         PTE_R | PTE_W | PTE_A | PTE_D) != 0) {
+                uvmfree(npt, 0);
+                return -1;
+            }
+            uint64 nsz = 0, nsp = 0;
+            if (uvmload(npt, (char *)start, end - start,
+                        wstart, memsz, &nsz, &nsp) != 0) {
+                uvmfree(npt, 0);    /* 旧空间原样保留,进程可继续运行 */
+                return -1;
+            }
 
-            /* 重新映射用户页:程序页(需 W 供写 BSS/数据) + 栈页 */
-            user_remap(0x0,    (uint64)p->prog_page,
-                       PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D);
-            user_remap(0x1000, (uint64)p->stack_page,
-                       PTE_R | PTE_W | PTE_U | PTE_A | PTE_D);
+            /* 全部成功:释放旧空间,切换到新空间 */
+            uvmfree(p->pagetable, p->sz);
+            p->pagetable = npt;
+            p->sz = nsz;
 
-            /* 设置新程序入口和栈顶 */
+            /* 新程序入口与栈顶 */
             p->trapframe->epc = 0;
-            p->trapframe->sp  = 0x2000;
+            p->trapframe->sp  = nsp;
 
             return 0;  /* 成功 */
         }
 
         /* 下一项表头在 binary 之后(end 处),.balign 8 后 */
         cur = (end + 7) & ~7UL;
+        idx++;
     }
 
     return -1;  /* 未找到程序 */
@@ -190,11 +195,11 @@ sys_fork(void)
 }
 
 /* sys_wait(status):等待子进程退出,回收资源
- * lab2 简化:忽略 status 指针,只返回子进程 pid */
+ * status 用户指针非 0 时回写子进程退出状态 */
 static uint64
 sys_wait(void)
 {
-    return wait();
+    return wait(myproc()->trapframe->a0);
 }
 
 /* syscall:由 usertrap 调用,根据 a7 分发

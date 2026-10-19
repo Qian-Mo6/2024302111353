@@ -113,20 +113,28 @@ usertrap(void)
         /* 时钟中断:lab4 处理 */
 
     } else {
-        printf("usertrap(): unexpected scause %x pid=%d\n", scause, p->pid);
-        printf("            sepc=%x stval=%x\n", r_sepc(), r_stval());
-        for (;;) { }
+        /* 用户异常(越界/保护页缺页/非法指令/写代码页等):
+         * 打印定位信息后终止当前进程(badaccess 语义:进程被杀、内核完好),
+         * 等价于 exit(-1)——父进程 wait 可见非零状态;
+         * exit_current 内切回父进程(无父进程则停机),随后 usertrapret
+         * 返回的是父进程现场。 */
+        printf("usertrap: kill pid=%d scause=%x sepc=%x stval=%x\n",
+               p->pid, scause, r_sepc(), r_stval());
+        exit_current(-1);
     }
 
     usertrapret();
 }
 
-/* usertrapret:返回用户态前的环境准备 */
+/* usertrapret:返回用户态前的环境准备
+ * satp 协议(lab3 §2.2):a0 = 本进程用户页表的 satp 值,
+ * 由 trampoline 的 userret 切换;trapframe 经固定 VA TRAPFRAME 定位。 */
 void
 usertrapret(void)
 {
     struct proc *p = myproc();
-    uint64 satp = r_satp();
+    uint64 kernel_satp = r_satp();            /* 当前内核页表 satp */
+    uint64 user_satp   = MAKE_SATP(p->pagetable);
 
     w_stvec(TRAMPOLINE + ((uint64)trampoline & 0xfff));
 
@@ -137,11 +145,15 @@ usertrapret(void)
 
     w_sepc(p->trapframe->epc);
 
-    p->trapframe->kernel_satp = satp;
-    p->trapframe->kernel_sp = (uint64)p + PGSIZE;
+    p->trapframe->kernel_satp = kernel_satp;
+    p->trapframe->kernel_sp = p->kstack;      /* KSTACK 高地址映射的内核栈 */
     p->trapframe->kernel_trap = (uint64)usertrap;
     p->trapframe->kernel_hartid = r_tp();
 
-    void (*userret_fn)(uint64) = (void *)userret;
-    userret_fn(satp);
+    /* 必须经 TRAMPOLINE 固定 VA 调用 userret:userret 中途把 satp 切成
+     * 用户页表,之后取指要靠"跳板页在两表同址"续上;若用内核恒等地址调用,
+     * 切表瞬间 PC 落在用户页表未映射区,指令缺页(scause=12)。 */
+    uint64 userret_va = TRAMPOLINE + ((uint64)userret - (uint64)trampoline);
+    void (*userret_fn)(uint64) = (void *)userret_va;
+    userret_fn(user_satp);
 }

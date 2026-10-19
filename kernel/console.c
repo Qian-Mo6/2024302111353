@@ -136,8 +136,9 @@ uartintr(void)
     cons_rx_store((char)*uart_thr);
 }
 
-/* consoleread:从控制台读最多 n 个字节到 user_dst
- * lab2 简化:内核与用户共用页表,可直接写入用户地址(lab3 改 copyout)
+/* consoleread:从控制台读最多 n 个字节到内核缓冲区 kbuf
+ * lab3 阶段四:独立用户页表后内核不再直接写用户地址——
+ * 本函数只填内核缓冲区,由 sys_read 用 copyout 交付用户。
  *
  * LAB2_BUF_SEMANTICS = 1(字符流):缓冲区按字符队列组织,交付规则 ——
  * 逐个交出已到达的字节,遇到 '\n'(行结束)或达到调用方限额 n 时返回:
@@ -147,7 +148,7 @@ uartintr(void)
  * UART,把到达的字节经同一归一化入口 cons_rx_store 入缓冲后再取,
  * 使中断路径与轮询路径行为一致。返回实际读取的字节数 */
 int
-consoleread(char *user_dst, int n)
+consoleread(char *kbuf, int n)
 {
     int i;
     for (i = 0; i < n; i++) {
@@ -163,8 +164,8 @@ consoleread(char *user_dst, int n)
             }
         }
 
-        /* 写入用户缓冲区(lab2 直址,lab3 改 copyout) */
-        user_dst[i] = (char)ch;
+        /* 写入内核缓冲区(sys_read 负责 copyout 给用户) */
+        kbuf[i] = (char)ch;
 
         /* 行结束:把这一行交付给调用方后返回 */
         if ((char)ch == '\n') {

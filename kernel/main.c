@@ -1,18 +1,11 @@
-/* ============ lab2 阶段六 · fork/wait 自测版 main.c ============
- * 阶段五:测试 sys_exec(_user_test 调 exec("hi",0) -> 加载 hi 程序)
- * 阶段六:测试 sys_fork + sys_wait
- *         _user_test 调 fork,子进程 exec("hi"),父进程 wait 回收
- *
- * 流程:
- *   1. _user_test fork -> 切到子进程运行
- *   2. 子进程 a0=0,跳 child 分支,exec("hi") 加载 hi 程序
- *   3. hi 运行(getpid+printf+write),exit(0) -> 切回父进程
- *   4. 父进程 fork 返回子pid,wait 回收子进程,exit(0)
- *
- * 期望输出:
- *   hi: user program running, pid=2
- *   user process exited with 0      (子进程 hi exit)
- *   user process exited with 0      (父进程 exit)
+/* ============ lab3 阶段四 · 用户进程独立页表版 main.c ============
+ * 启动流程:
+ *   1. consoleinit/banner/kinit(物理页分配器)/plicinit/开外部中断
+ *   2. kvminit + kvminithart:内核页表(恒等映射 + 外设 + TRAMPOLINE)
+ *   3. allocproc:首进程用户页表 + TRAPFRAME 同址 + KSTACK 内核栈
+ *   4. initcode(_user_test)装配进用户页表:RXU 代码页 + 保护页 + RWU 栈页
+ *   5. usertrapret:a0 = 用户页表 satp,经 trampoline 切入 U 态
+ * 用户空间指针一律经 copyin/copyout;不再使用 SSTATUS_SUM。
  * ======================================== */
 #include "types.h"
 #include "riscv.h"
@@ -34,6 +27,12 @@
  * satp 后恒等映射可读写),正式构建置 0。 */
 #define LAB3_KVM_SELFTEST 0
 
+/* lab3 阶段四临时验证开关:1=上电自检用户地址空间
+ * (uvmload 布局与段权限 / uvmcopy 物理隔离 / copyin-copyout / uvmfree 守恒 /
+ * _uprog_meta 构建期元数据自洽)。
+ * 已验证 PASS(5/5),正式构建置 0。 */
+#define LAB3_UVM_SELFTEST 0
+
 void consoleinit(void);
 void plicinit(void);
 void printf(char *fmt, ...);
@@ -41,9 +40,12 @@ void usertrapret(void);
 struct proc *myproc(void);
 extern void kernelvec(void);
 
+/* QEMU 需要 A/D 位(riscv.h 未定义,与 vm.c 保持一致) */
+#define PTE_A (1L << 6)
+#define PTE_D (1L << 7)
+
 extern char _user_test[];
 
-pagetable_t kvminit(uint64 trampoline_pa, uint64 trapframe_pa, uint64 user_code_pa);
 void kvminithart(pagetable_t kpgtbl);
 
 extern char trampoline[];
@@ -217,6 +219,140 @@ main(void)
 
     w_sie(r_sie() | SIE_SEIE);
 
+    /* 内核页表:恒等映射全部 RAM + UART/PLIC + TRAMPOLINE;
+     * 须在首个 allocproc 之前建好(kstack_map/uvmcreate 依赖它) */
+    uint64 trampoline_pa = PGROUNDDOWN((uint64)trampoline);
+    pagetable_t kpgtbl = kvminit(trampoline_pa);
+    printf("kpgtbl=%x, switching satp...\n", (uint64)kpgtbl);
+    kvminithart(kpgtbl);
+
+#if LAB3_UVM_SELFTEST
+    /* 阶段四临时验证(验证通过后把上面的宏置 0):
+     * ① uvmload 布局与段权限:伪造 3 页镜像(wstart=0x2000,memsz=filesz+37),
+     *    检查代码页 RXU 无 W、数据页 RWU 无 X、bss 清零、guard 空洞、栈顶 sz/sp;
+     * ② uvmcopy:物理隔离(PA 不同、内容同、权限同),写副本不影响原页;
+     * ③ copyin/copyout/copyinstr:跨表受控拷贝,代码页与 guard 空洞写失败;
+     * ④ uvmfree 后 kpages_used 回基线;
+     * ⑤ _uprog_meta:wstart 页对齐(pagepad 生效)、filesz ≤ memsz、0 < wstart ≤ memsz。 */
+    {
+        int ok = 1;
+        uint64 base0 = kpages_used();
+
+        /* ① 伪造镜像:2 页代码/只读 + 100 字节数据 + 37 字节 bss
+         * (镜像放 bss 静态数组:kalloc 单页装不下 2 页+且页间不保证连续) */
+        static char img[3 * PGSIZE];
+        uint64 filesz = 2 * PGSIZE + 100;
+        for (uint64 i = 0; i < filesz; i++)
+            img[i] = (char)(i * 7 + 1);
+        uint64 memsz = filesz + 37;
+
+        pagetable_t t1 = uvmcreate();
+        uint64 sz1 = 0, sp1 = 0;
+        if (!t1 || uvmload(t1, img, filesz, 2 * PGSIZE, memsz, &sz1, &sp1) != 0)
+            ok = 0;
+        uint64 top = PGROUNDUP(memsz);
+        uint64 stack_va = top + LAB3_GUARD_PAGES * PGSIZE;
+        if (ok) {
+            pte_t *e0 = walk(t1, 0, 0);              /* 代码页 */
+            pte_t *e2 = walk(t1, 2 * PGSIZE, 0);     /* 数据页 */
+            pte_t *es = walk(t1, stack_va, 0);       /* 栈页 */
+            pte_t *eg = walk(t1, top, 0);            /* guard 首页(空洞) */
+            if (!e0 || (*e0 & (PTE_R | PTE_X | PTE_U)) != (PTE_R | PTE_X | PTE_U)) ok = 0;
+            if (e0 && (*e0 & PTE_W)) ok = 0;                       /* 代码页无 W */
+            if (!e2 || (*e2 & (PTE_R | PTE_W | PTE_U)) != (PTE_R | PTE_W | PTE_U)) ok = 0;
+            if (e2 && (*e2 & PTE_X)) ok = 0;
+            if (!es || (*es & (PTE_R | PTE_W | PTE_U)) != (PTE_R | PTE_W | PTE_U)) ok = 0;
+            if (eg && (*eg & PTE_V)) ok = 0;                       /* guard 无映射 */
+            if (sz1 != stack_va + PGSIZE || sp1 != sz1) ok = 0;
+            if (e2) {
+                char *dpa = (char *)PTE2PA(*e2);
+                for (uint64 i = 100; i < 137; i++)                 /* bss 清零 */
+                    if (dpa[i] != 0) { ok = 0; break; }
+                for (uint64 i = 0; i < 100; i++)                   /* 内容一致 */
+                    if (dpa[i] != (char)((2 * PGSIZE + i) * 7 + 1)) { ok = 0; break; }
+            }
+        }
+        printf("uvm selftest 1/5 layout: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ② uvmcopy 物理隔离 */
+        pagetable_t t2 = uvmcreate();
+        if (!t2 || uvmcopy(t1, t2, sz1) != 0) ok = 0;
+        if (ok) {
+            pte_t *a  = walk(t1, 2 * PGSIZE, 0);
+            pte_t *b  = walk(t2, 2 * PGSIZE, 0);
+            pte_t *tb = walk(t2, 0, 0);
+            pte_t *g2 = walk(t2, top, 0);
+            if (!a || !b || PTE2PA(*a) == PTE2PA(*b)) ok = 0;      /* 物理隔离 */
+            if (a && b && PTE_FLAGS(*a) != PTE_FLAGS(*b)) ok = 0;  /* 权限保留 */
+            if (tb && (PTE_FLAGS(*tb) & PTE_W)) ok = 0;            /* 副本代码页仍无 W */
+            if (g2 && (*g2 & PTE_V)) ok = 0;                       /* 副本 guard 仍空洞 */
+            if (a && b) {
+                char *pa = (char *)PTE2PA(*a), *pb = (char *)PTE2PA(*b);
+                for (int i = 0; i < 100; i++)
+                    if (pa[i] != pb[i]) { ok = 0; break; }         /* 内容一致 */
+                pb[0] = (char)~pa[0];
+                if (pa[0] == pb[0]) ok = 0;                        /* 写副本不改原件 */
+            }
+        }
+        printf("uvm selftest 2/5 fork-copy: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ③ copyin/copyout/copyinstr */
+        {
+            char kbuf[32], rbuf[32];
+            for (int i = 0; i < 32; i++) { kbuf[i] = (char)(0x40 + i); rbuf[i] = 0; }
+            if (copyout(t1, 2 * PGSIZE, kbuf, 32) != 0) ok = 0;
+            if (copyin(t1, rbuf, 2 * PGSIZE, 32) != 0) ok = 0;
+            for (int i = 0; i < 32; i++)
+                if (rbuf[i] != (char)(0x40 + i)) ok = 0;
+            if (copyout(t1, 0, kbuf, 32) == 0) ok = 0;             /* 代码页无 W:失败 */
+            if (copyout(t1, top, kbuf, 32) == 0) ok = 0;           /* guard 空洞:失败 */
+            pte_t *ed = walk(t1, 2 * PGSIZE, 0);
+            if (ed) {
+                char *dpa = (char *)PTE2PA(*ed);
+                dpa[0] = 'o'; dpa[1] = 'k'; dpa[2] = 0;
+                char sbuf[8];
+                for (int i = 0; i < 8; i++) sbuf[i] = 0;
+                if (copyinstr(t1, sbuf, 2 * PGSIZE, 8) != 0) ok = 0;
+                if (sbuf[0] != 'o' || sbuf[1] != 'k' || sbuf[2] != 0) ok = 0;
+            } else ok = 0;
+        }
+        printf("uvm selftest 3/5 copyin/out: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ④ uvmfree 回收守恒 */
+        uvmfree(t1, sz1);
+        uvmfree(t2, sz1);
+        if (kpages_used() != base0) ok = 0;
+        printf("uvm selftest 4/5 free: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ⑤ 构建期元数据自洽 */
+        {
+            extern char _uprog_table[];
+            extern uint64 _uprog_meta[];
+            uint64 curp = (uint64)_uprog_table;
+            int i = 0, n = 0;
+            for (;;) {
+                uint64 s = *(uint64 *)curp;
+                uint64 e = *(uint64 *)(curp + 8);
+                if (s == 0 && e == 0) break;
+                uint64 ws = _uprog_meta[i * 2], me = _uprog_meta[i * 2 + 1];
+                if ((ws & (PGSIZE - 1)) != 0) ok = 0;   /* pagepad 对齐生效 */
+                if (ws == 0 || ws > me) ok = 0;
+                if (e - s > me) ok = 0;
+                curp = (e + 7) & ~7UL;
+                i++; n++;
+            }
+            if (n == 0) ok = 0;
+            printf("uvm selftest 5/5 meta(%d progs): %s\n", n, ok ? "PASS" : "FAIL");
+            if (!ok) { intr_off(); while (1) {} }
+        }
+    }
+#endif
+
+    /* 首进程:allocproc 建用户页表 + TRAPFRAME 同址 + KSTACK 内核栈 */
     struct proc *p = allocproc();
     if (!p) { printf("allocproc failed\n"); while (1) {} }
     printf("proc pid=%d\n", p->pid);
@@ -224,29 +360,31 @@ main(void)
     extern struct proc *curproc;
     curproc = p;
 
-    /* 把内核 _user_test 所在页复制到 p->prog_page,作为初始用户程序
-     * 使 VA 0x0 始终映射到进程自己的 prog_page,与 exec/fork 语义一致 */
+    /* initcode(_user_test)装配进首进程用户页表:
+     * VA0 一页 RXU 代码(含 "sh" 字符串),LAB3_GUARD_PAGES 个保护页空洞,
+     * 再一页 RWU 用户栈;堆自栈顶向上。与 exec 装载布局一致。 */
     uint64 code_page = PGROUNDDOWN((uint64)_user_test);
-    for (int i = 0; i < PGSIZE; i++)
-        p->prog_page[i] = ((char *)code_page)[i];
+    uint64 code_off  = (uint64)_user_test - code_page;
+    char *cpage = (char *)kalloc();
+    char *spage = (char *)kalloc();
+    if (!cpage || !spage) { printf("initcode: no mem\n"); while (1) {} }
+    for (uint64 i = code_off; i < PGSIZE; i++)
+        cpage[i] = ((char *)code_page)[i];
+    uint64 istack_va = PGSIZE + LAB3_GUARD_PAGES * PGSIZE;
+    if (mappages(p->pagetable, 0, PGSIZE, (uint64)cpage,
+                 PTE_R | PTE_X | PTE_U | PTE_A) != 0) {
+        printf("initcode: map text failed\n"); while (1) {}
+    }
+    if (mappages(p->pagetable, istack_va, PGSIZE, (uint64)spage,
+                 PTE_R | PTE_W | PTE_U | PTE_A | PTE_D) != 0) {
+        printf("initcode: map stack failed\n"); while (1) {}
+    }
+    p->sz = istack_va + PGSIZE;
+    p->trapframe->epc = code_off;
+    p->trapframe->sp  = p->sz;
 
-    uint64 user_code_pa = (uint64)p->prog_page;
-    uint64 trampoline_pa = PGROUNDDOWN((uint64)trampoline);
-    uint64 trapframe_pa  = (uint64)p->trapframe;
-
-    /* _user_test 入口 = 页内偏移(VA 0x0 起始)
-     * sys_exec/sys_fork 会用 user_remap 重新映射 VA 0x0/0x1000 */
-    p->trapframe->epc = (uint64)_user_test - code_page;
-    /* sp=0x2000:栈顶,sys_exec 会映射 VA 0x1000 → 栈页 */
-    p->trapframe->sp  = 0x2000;
-
-    printf("user_epc=%x trampoline=%x tf=%x\n",
-           p->trapframe->epc, trampoline_pa, trapframe_pa);
-
-    pagetable_t kpgtbl = kvminit(trampoline_pa, trapframe_pa, user_code_pa);
-    printf("kpgtbl=%x, switching satp...\n", (uint64)kpgtbl);
-
-    kvminithart(kpgtbl);
+    printf("user_epc=%x sz=%x trampoline=%x tf=%x\n",
+           p->trapframe->epc, p->sz, trampoline_pa, (uint64)p->trapframe);
 
 #if LAB3_KVM_SELFTEST
     /* 阶段三临时验证(验证通过后把上面的宏置 0):
@@ -298,7 +436,8 @@ main(void)
     }
 #endif
 
-    w_sstatus(r_sstatus() | SSTATUS_SUM);
+    /* 阶段四:独立用户页表后内核经 copyin/copyout 访问用户内存,
+     * 不再需要 SSTATUS_SUM(内核不解引用用户 VA),移除 lab2 的 SUM 设置。 */
 
     printf("satp OK, going to U mode...\n");
     printf("_user_test: exec(\"sh\", 0) -> shell\n");

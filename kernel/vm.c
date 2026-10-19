@@ -16,6 +16,7 @@
 #include "types.h"
 #include "riscv.h"
 #include "memlayout.h"
+#include "course_sid.h"   /* LAB3_GUARD_PAGES */
 #include "vm.h"
 
 /* QEMU 需要 A/D 位 */
@@ -24,8 +25,11 @@
 
 void printf(char *fmt, ...);
 
-/* 全局内核页表指针:user_remap(lab2 遗留,阶段四移除)用它 */
+/* 全局内核页表指针:kstack_map/kstack_unmap 在内核页表高地址建/拆
+ * 进程内核栈映射(KSTACK 宏,与 lab0 快照图一致)。 */
 static pagetable_t g_kpgtbl = 0;
+/* 跳板页物理地址:kvminit 记录,供 uvmcreate 在每个用户页表同址映射 */
+static uint64 g_trampoline_pa = 0;
 
 static void
 vm_panic(char *msg)
@@ -164,6 +168,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 void
 unmappings(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
 {
+    if (size == 0)
+        return;                             /* 空区间:无副作用(uvmfree 允许 sz=0) */
     uint64 start = PGROUNDDOWN(va);
     uint64 end   = PGROUNDDOWN(va + size - 1) + PGSIZE;
 
@@ -180,16 +186,220 @@ unmappings(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
     vm_prune(pagetable, start, end);
 }
 
-/* user_remap:lab2 遗留——在全局内核页表中重映射某个用户 VA
- * 直接覆盖原有 PTE(若已存在)。被 proc.c fork / syscall.c wait、exec 使用,
- * 阶段四改造为独立用户页表前必须保留可用。 */
-void
-user_remap(uint64 va, uint64 pa, int perm)
+/* ============ lab3 阶段四 · 用户地址空间 ============
+ * 每进程独立用户页表:代码/只读(RXU,不含 W)在低地址、数据/bss(RWU)、
+ * LAB3_GUARD_PAGES 个保护页(空洞,遍历跳过)、一页用户栈(RWU)、
+ * 堆自栈顶向上增长。TRAPFRAME 在各用户页表同址映射(RW 无 U,归内核所有);
+ * TRAMPOLINE 与内核页表同址(RX,共享同一物理页)。
+ *
+ * 段权限数据链路:平铺 .bin 不携带权限,构建期从 ELF 提取——
+ * Makefile 用 pagepad.o 把 .data 对齐到页边界(代码页与数据页不再同页,
+ * 代码页才能真正去掉 W),objdump/nm 取 .data VMA 与 end 符号,
+ * 生成 _uprog_meta 表(wstart/memsz)供 uvmload 使用。 */
+
+/* uvmcreate:新建用户页表(仅含 TRAMPOLINE 同址映射) */
+pagetable_t
+uvmcreate(void)
 {
-    if (!g_kpgtbl) return;
-    pte_t *pte = walk(g_kpgtbl, va, 1);
-    if (!pte) return;
-    *pte = PA2PTE(pa) | perm | PTE_V;
+    pagetable_t pt = (pagetable_t)kalloc();
+    if (!pt)
+        return 0;
+    if (mappages(pt, TRAMPOLINE, PGSIZE, g_trampoline_pa,
+                 PTE_R | PTE_X | PTE_A) != 0) {
+        uvmfree(pt, 0);
+        return 0;
+    }
+    return pt;
+}
+
+/* uvmload:向用户页表装载平铺程序镜像并布置栈/保护页
+ *   img/filesz:镜像内核地址与文件字节数([0,filesz) 拷入,其余置零=bss/对齐隙)
+ *   wstart:可写段(.data)起始 VA(构建期已页对齐;回退情形取 PGROUNDDOWN)
+ *   memsz:进程镜像总大小(end 符号,含 bss)
+ * 布局:[0, PGROUNDDOWN(wstart)) RXU | [wpg, PGROUNDUP(memsz)) RWU |
+ *      LAB3_GUARD_PAGES 保护页(不映射) | 栈页 RWU;堆顶 sz = 栈顶。
+ * 返回 0 成功并填 szp/spp 指向的值;-1 失败,已建映射全部回滚(数据页+中间页回收)。 */
+int
+uvmload(pagetable_t pt, char *img, uint64 filesz,
+        uint64 wstart, uint64 memsz, uint64 *szp, uint64 *spp)
+{
+    if (filesz > memsz)
+        return -1;                          /* 元数据不自洽,拒绝装载 */
+    uint64 wpg = PGROUNDDOWN(wstart);       /* 可写区首页 */
+    uint64 top = PGROUNDUP(memsz);          /* 代码+数据区顶端 */
+    if (top == 0 || top + (LAB3_GUARD_PAGES + 1) * PGSIZE > TRAPFRAME)
+        return -1;                          /* 越过 TRAPFRAME,拒绝 */
+
+    for (uint64 va = 0; va < top; va += PGSIZE) {
+        char *mem = (char *)kalloc();
+        if (!mem)
+            goto fail;
+        /* 页内 [0,filesz) 来自镜像,其余保持 kalloc 清零(bss 与对齐隙) */
+        for (uint64 off = 0; off < PGSIZE && va + off < filesz; off++)
+            mem[off] = img[va + off];
+        int perm = PTE_U | PTE_A;
+        if (va < wpg) perm |= PTE_R | PTE_X;         /* 代码/只读页:无 W */
+        else          perm |= PTE_R | PTE_W | PTE_D; /* 数据/bss 页 */
+        if (mappages(pt, va, PGSIZE, (uint64)mem, perm) != 0) {
+            kfree(mem);
+            goto fail;
+        }
+    }
+
+    uint64 stack_va = top + LAB3_GUARD_PAGES * PGSIZE;   /* 保护页空洞不映射 */
+    char *stk = (char *)kalloc();
+    if (!stk)
+        goto fail;
+    if (mappages(pt, stack_va, PGSIZE, (uint64)stk,
+                 PTE_R | PTE_W | PTE_U | PTE_A | PTE_D) != 0) {
+        kfree(stk);
+        goto fail;
+    }
+
+    *szp = stack_va + PGSIZE;   /* 堆自栈顶向上增长 */
+    *spp = stack_va + PGSIZE;   /* 初始栈顶 */
+    return 0;
+
+fail:
+    /* 空洞跳过语义下,整段 unmappings 可安全回收已建部分 */
+    unmappings(pt, 0, top + (LAB3_GUARD_PAGES + 1) * PGSIZE, 1);
+    return -1;
+}
+
+/* uvmcopy:把 old 的 [0,sz) 逐页深拷贝到 new(每页新物理页,物理隔离)
+ * 空洞(guard 页)跳过;权限位原样保留(代码页保持无 W)。
+ * trapframe(TRAPFRAME)与跳板(TRAMPOLINE)位于 sz 之上,不在拷贝范围。
+ * 返回 0 成功;-1 失败,已拷贝部分由调用方 uvmfree 统一回收。 */
+int
+uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+{
+    for (uint64 va = 0; va < sz; va += PGSIZE) {
+        pte_t *pte = walk(old, va, 0);
+        if (!pte || (*pte & PTE_V) == 0)
+            continue;                       /* 保护页空洞:跳过 */
+        uint64 pa = PTE2PA(*pte);
+        int flags = (int)PTE_FLAGS(*pte);   /* 权限原样保留 */
+        char *mem = (char *)kalloc();
+        if (!mem)
+            return -1;
+        for (uint64 i = 0; i < PGSIZE; i++) /* 经内核恒等映射读父页 */
+            mem[i] = ((char *)pa)[i];
+        if (mappages(new, va, PGSIZE, (uint64)mem, flags) != 0) {
+            kfree(mem);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* uvmfree:释放整个用户地址空间
+ * [0,sz) 数据页回收;TRAPFRAME 物理页归内核(tf_pool)、TRAMPOLINE 页共享,
+ * 仅拆 PTE 不释放;中间页表页由 prune 回收;最后释放根页表页。 */
+void
+uvmfree(pagetable_t pt, uint64 sz)
+{
+    if (!pt)
+        return;
+    unmappings(pt, 0, sz, 1);
+    unmappings(pt, TRAPFRAME, PGSIZE, 0);
+    unmappings(pt, TRAMPOLINE, PGSIZE, 0);
+    kfree((void *)pt);
+}
+
+/* copyin:从用户地址 srcva 拷 len 字节到内核 dst(跨页逐页翻译)
+ * 页不存在或无 U 位返回 -1。经 PTE 得物理地址后走内核恒等映射,
+ * 不需要 SSTATUS_SUM。 */
+int
+copyin(pagetable_t pt, char *dst, uint64 srcva, uint64 len)
+{
+    while (len > 0) {
+        uint64 va0 = PGROUNDDOWN(srcva);
+        pte_t *pte = walk(pt, va0, 0);
+        if (!pte || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+            return -1;
+        uint64 n = PGSIZE - (srcva - va0);
+        if (n > len) n = len;
+        char *pa = (char *)(PTE2PA(*pte) + (srcva - va0));
+        for (uint64 i = 0; i < n; i++)
+            dst[i] = pa[i];
+        dst += n; srcva += n; len -= n;
+    }
+    return 0;
+}
+
+/* copyout:从内核 src 拷 len 字节到用户地址 dstva
+ * 额外要求目标页有 W 位(代码页 RX,copyout 失败返回 -1)。 */
+int
+copyout(pagetable_t pt, uint64 dstva, char *src, uint64 len)
+{
+    while (len > 0) {
+        uint64 va0 = PGROUNDDOWN(dstva);
+        pte_t *pte = walk(pt, va0, 0);
+        if (!pte || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
+            (*pte & PTE_W) == 0)
+            return -1;
+        uint64 n = PGSIZE - (dstva - va0);
+        if (n > len) n = len;
+        char *pa = (char *)(PTE2PA(*pte) + (dstva - va0));
+        for (uint64 i = 0; i < n; i++)
+            pa[i] = src[i];
+        src += n; dstva += n; len -= n;
+    }
+    return 0;
+}
+
+/* copyinstr:从用户地址 srcva 拷 NUL 结尾字符串到内核 dst(至多 max 字节,
+ * 含 NUL)。成功(遇到 NUL)返回 0;越界/超长/无映射返回 -1。 */
+int
+copyinstr(pagetable_t pt, char *dst, uint64 srcva, uint64 max)
+{
+    while (max > 0) {
+        uint64 va0 = PGROUNDDOWN(srcva);
+        pte_t *pte = walk(pt, va0, 0);
+        if (!pte || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+            return -1;
+        uint64 n = PGSIZE - (srcva - va0);
+        if (n > max) n = max;
+        char *pa = (char *)(PTE2PA(*pte) + (srcva - va0));
+        for (uint64 i = 0; i < n; i++) {
+            char c = pa[i];
+            dst[i] = c;
+            if (c == '\0')
+                return 0;
+        }
+        dst += n; srcva += n; max -= n;
+    }
+    return -1;                              /* max 内未见 NUL */
+}
+
+/* kstack_map:为进程槽 idx 在内核页表 KSTACK(idx) 高地址建内核栈映射
+ * (lab0 快照图布局:栈页下方留一页不映射作溢出保护)。
+ * 返回栈顶 VA(KSTACK(idx)+PGSIZE);失败返回 0。 */
+uint64
+kstack_map(int idx)
+{
+    if (!g_kpgtbl)
+        return 0;
+    char *mem = (char *)kalloc();
+    if (!mem)
+        return 0;
+    uint64 va = KSTACK(idx);
+    if (mappages(g_kpgtbl, va, PGSIZE, (uint64)mem,
+                 PTE_R | PTE_W | PTE_A | PTE_D) != 0) {
+        kfree(mem);
+        return 0;
+    }
+    sfence_vma();
+    return va + PGSIZE;
+}
+
+/* kstack_unmap:拆除进程槽 idx 的内核栈映射并回收物理页 */
+void
+kstack_unmap(int idx)
+{
+    if (!g_kpgtbl)
+        return;
+    unmappings(g_kpgtbl, KSTACK(idx), PGSIZE, 1);
     sfence_vma();
 }
 
@@ -206,14 +416,15 @@ user_remap(uint64 va, uint64 pa, int perm)
  *   进行,不读写 CLINT MMIO 寄存器——保持最小映射面,设计笔记中说明。
  * - TRAMPOLINE 映射在最高地址:跳板页必须与用户页表同址,
  *   uservec/userret 切 satp 前后指令流才能不断档。
- * - TRAPFRAME / 可选的首个用户程序 VA 0x0(user_remap 会覆盖)。
+ * - TRAPFRAME 不进内核页表:内核经 p->trapframe 的内核 VA(bss 恒等映射)
+ *   直接访问;TRAPFRAME 固定 VA 的映射由每个用户页表各自携带(allocproc)。
  *
  * sfence.vma 时机:本函数只建表不刷 TLB;刷 TLB 由各切换点负责——
  *   kvminithart 写 satp 后、uservec/userret 换页表前后(trampoline
- *   预置)、user_remap 改 PTE 后。批量建映射由调用方统一刷,避免逐页刷。
+ *   预置)、kstack_map/kstack_unmap 改 PTE 后。批量建映射由调用方统一刷。
  * 任一步失败说明早期内存不足,直接 panic。 */
 pagetable_t
-kvminit(uint64 trampoline_pa, uint64 trapframe_pa, uint64 user_code_pa)
+kvminit(uint64 trampoline_pa)
 {
     pagetable_t kpgtbl = (pagetable_t)kalloc();
     if (!kpgtbl)
@@ -236,20 +447,13 @@ kvminit(uint64 trampoline_pa, uint64 trapframe_pa, uint64 user_code_pa)
     if (mappages(kpgtbl, PLIC, 0x400000, PLIC, PTE_R | PTE_W | PTE_A | PTE_D) != 0)
         vm_panic("kvminit: map PLIC");
 
-    /* TRAMPOLINE / TRAPFRAME 需要单独映射(在高地址,不在 superpage 范围内) */
+    /* TRAMPOLINE 需要单独映射(在高地址,不在 superpage 范围内) */
     if (mappages(kpgtbl, TRAMPOLINE, PGSIZE, trampoline_pa, PTE_R | PTE_X | PTE_A | PTE_D) != 0)
         vm_panic("kvminit: map TRAMPOLINE");
-    if (mappages(kpgtbl, TRAPFRAME, PGSIZE, trapframe_pa, PTE_R | PTE_W | PTE_A | PTE_D) != 0)
-        vm_panic("kvminit: map TRAPFRAME");
 
-    /* 用户代码页:VA 0x0 → user_code_pa,需要 U 位供 U 态执行
-     * sys_exec 会用 user_remap 覆盖此映射以加载新程序 */
-    if (user_code_pa)
-        if (mappages(kpgtbl, 0x0, PGSIZE, user_code_pa, PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D) != 0)
-            vm_panic("kvminit: map user code");
-
-    /* 保存全局引用供 user_remap 使用 */
+    /* 保存全局引用:kstack_map 改内核页表、uvmcreate 取跳板页地址 */
     g_kpgtbl = kpgtbl;
+    g_trampoline_pa = trampoline_pa;
 
     return kpgtbl;
 }

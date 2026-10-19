@@ -6,6 +6,8 @@ CFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding \
 QEMU = qemu-system-riscv64
 
 OBJCOPY ?= riscv64-unknown-elf-objcopy
+OBJDUMP ?= riscv64-unknown-elf-objdump
+NM      ?= riscv64-unknown-elf-nm
 
 OBJS = kernel/entry.o kernel/start.o kernel/console.o kernel/printf.o kernel/main.o \
        kernel/proc.o kernel/trap.o kernel/syscall.o kernel/vm.o kernel/kalloc.o kernel/trampoline.o kernel/kernelvec.o kernel/userimg.o kernel/plic.o
@@ -38,8 +40,18 @@ UFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding \
 user/usys.S: user/usys.pl
 	perl user/usys.pl > user/usys.S
 
+# pagepad.o:把 .data 输出段对齐到页边界(lab3 段权限前提)
+# 小程序的代码/只读与 .data/.bss 原本同处一页,页粒度下代码页无法去 W;
+# 链接时把本目标置于最前,其 .data 输入段带 4096 对齐要求,
+# ld 会把整个 .data 输出段对齐到页边界(对齐隙在 .bin 中补零,bss 由内核清零)。
+# user.ld 保持不变;程序仍从基址 0 链接。
+user-flat/pagepad.o: Makefile
+	mkdir -p user-flat
+	printf '.section .data\n.balign 4096\n.globl __wstart_pad\n__wstart_pad:\n.byte 0\n' > user-flat/pagepad.S
+	$(CC) $(UFLAGS) -Iuser -c user-flat/pagepad.S -o $@
+
 # 用户程序 → 链接(基址 0)→ 平铺二进制
-user-flat/%.bin: user/%.c user/user.h user/ulib.c user/printf.c user/usys.S
+user-flat/%.bin: user/%.c user/user.h user/ulib.c user/printf.c user/usys.S user-flat/pagepad.o
 	mkdir -p user-flat
 	$(CC) $(UFLAGS) -Iuser -c user/ulib.c   -o user-flat/ulib.o
 	$(CC) $(UFLAGS) -Iuser -c user/printf.c -o user-flat/printf.o
@@ -50,12 +62,17 @@ user-flat/%.bin: user/%.c user/user.h user/ulib.c user/printf.c user/usys.S
 	  EXTRA_OBJS=user-flat/common.o; \
 	else EXTRA_OBJS=; fi; \
 	$(LD) -T user/user.ld -o user-flat/$*.elf \
-	    user-flat/$*.o $$EXTRA_OBJS user-flat/ulib.o user-flat/printf.o user-flat/usys.o
+	    user-flat/pagepad.o user-flat/$*.o $$EXTRA_OBJS user-flat/ulib.o user-flat/printf.o user-flat/usys.o
 	$(OBJCOPY) -O binary user-flat/$*.elf $@
 
 # 内嵌程序表(ABI,勿改):
 #   _uprog_table: 每项 = .quad start; .quad end; .asciz "name";
 #   以 .quad 0; .quad 0 结尾。内核侧按表遍历。
+# _uprog_meta(lab3 段权限元数据,与表项同序,附在哨兵之后,不改表 ABI):
+#   每项 = .quad wstart; .quad memsz;
+#   wstart = .data 输出段 VMA(经 pagepad 页对齐),即可写区起始;
+#   memsz  = end 符号(含 bss 的镜像总大小)。内核 uvmload 据此区分
+#   代码/只读页(RXU,无 W)与数据/bss 页(RWU)。
 kernel/userimg.S: Makefile $(addprefix user-flat/,$(UPROGS:=.bin))
 	printf '.section .rodata\n .global _uprog_table\n_uprog_table:\n' > $@.tmp
 	for p in $(UPROGS); do \
@@ -65,6 +82,18 @@ kernel/userimg.S: Makefile $(addprefix user-flat/,$(UPROGS:=.bin))
 	    $$p $$p $$p $$p $$p >> $@.tmp; \
 	done
 	printf ' .quad 0\n .quad 0\n' >> $@.tmp
+	printf ' .global _uprog_meta\n_uprog_meta:\n' >> $@.tmp
+	for p in $(UPROGS); do \
+	  ws=`$(OBJDUMP) -h user-flat/$$p.elf | awk '$$2==".data"{print $$4; exit}'`; \
+	  me=`$(NM) user-flat/$$p.elf | awk '$$3=="end"{print $$1; exit}'`; \
+	  if [ -z "$$ws" ]; then \
+	    ws=`$(OBJDUMP) -h user-flat/$$p.elf | awk '$$2==".bss"{print $$4; exit}'`; \
+	  fi; \
+	  if [ -z "$$ws" ]; then \
+	    ws=`printf '%x' $$(( (0x$$me + 0xfff) & ~0xfff ))`; \
+	  fi; \
+	  printf ' .quad 0x%s, 0x%s\n' "$$ws" "$$me" >> $@.tmp; \
+	done
 	mv $@.tmp $@
 
 clean-extra:
