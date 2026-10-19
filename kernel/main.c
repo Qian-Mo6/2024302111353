@@ -25,6 +25,10 @@
  * 已验证 PASS(对齐/升序/清零/守恒/触顶 32107 次后返回 0),正式构建置 0。 */
 #define LAB3_KALLOC_SELFTEST 0
 
+/* lab3 阶段二临时验证开关:1=上电自检 walk/mappages 回滚/unmappings。
+ * 已验证 PASS(map+walk / 回滚守恒 / unmap+prune),正式构建置 0。 */
+#define LAB3_VM_SELFTEST 0
+
 void consoleinit(void);
 void plicinit(void);
 void printf(char *fmt, ...);
@@ -112,6 +116,85 @@ main(void)
         if (kpages_used() != baseline) ok = 0;       /* 再次守恒 */
 
         printf("kalloc selftest: %s (cap=%d)\n", ok ? "PASS" : "FAIL", kpages_cap());
+        if (!ok) { intr_off(); while (1) {} }
+    }
+#endif
+
+#if LAB3_VM_SELFTEST
+    /* 阶段二临时验证(验证通过后把上面的宏置 0):
+     *  ① 独立根页表映射 3 页,walk 反查 PA 与权限位,空洞无有效叶子;
+     *  ② 耗空配额至剩 2 页空闲,发起需 3 个中间页的 4MB 映射,
+     *     验证失败完整回滚(used 回基线、目标区无残留、数据页所有权未被夺);
+     *  ③ unmappings(do_free=1) 回收 3 数据页 + 2 中间页,计数守恒。
+     * 注意 walk 语义:中间表存在时返回叶子 PTE 指针,调用方查 PTE_V。 */
+    {
+        uint64 base0 = kpages_used();
+
+        /* ① walk + mappages 基本语义 */
+        int ok = 1;
+        pagetable_t pt = (pagetable_t)kalloc();
+        char *d1 = kalloc(), *d2 = kalloc(), *d3 = kalloc();
+        if (!pt || !d1 || !d2 || !d3) ok = 0;
+        if (ok) {
+            if (mappages(pt, 0x1000, PGSIZE, (uint64)d1, PTE_R | PTE_W | PTE_U) != 0) ok = 0;
+            if (mappages(pt, 0x2000, PGSIZE, (uint64)d2, PTE_R | PTE_W | PTE_U) != 0) ok = 0;
+            if (mappages(pt, 0x3000, PGSIZE, (uint64)d3, PTE_R | PTE_X | PTE_U) != 0) ok = 0;
+            pte_t *e1 = walk(pt, 0x1000, 0);
+            pte_t *e3 = walk(pt, 0x3000, 0);
+            pte_t *e4 = walk(pt, 0x4000, 0);
+            if (!e1 || (*e1 & PTE_V) == 0 || PTE2PA(*e1) != (uint64)d1) ok = 0;
+            if (!e1 || (*e1 & (PTE_R | PTE_W | PTE_U)) != (PTE_R | PTE_W | PTE_U)) ok = 0;
+            if (e1 && (*e1 & PTE_X)) ok = 0;                       /* d1 无 X */
+            if (!e3 || PTE2PA(*e3) != (uint64)d3) ok = 0;
+            if (e3 && ((*e3 & PTE_X) == 0 || (*e3 & PTE_W))) ok = 0; /* d3 有 X 无 W */
+            if (e4 && (*e4 & PTE_V)) ok = 0;                       /* 空洞无叶子 */
+            if (kpages_used() != base0 + 6) ok = 0;  /* 根+L1+L0+3 数据页 */
+        }
+        printf("vm selftest 1/3 map+walk: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ② 耗空至剩 2 页空闲,验证大区间映射失败完整回滚 */
+        ok = 1;
+        uint64 before = kpages_used();
+        {
+            static void *hold[(PHYSTOP - KERNBASE) / PGSIZE];
+            uint64 n = 0;
+            while (kpages_free() > 3) {
+                void *q = kalloc();
+                if (!q) { ok = 0; break; }
+                hold[n++] = q;
+            }
+            char *victim = kalloc();        /* 调用方数据页,回滚后所有权应保留 */
+            uint64 v_used = kpages_used();  /* victim 分配后的占用基线 */
+            if (!victim || kpages_free() != 2) ok = 0;
+            if (ok) {
+                /* VA 1GB 处映 4MB:需 L1+2×L0 共 3 中间页,仅 2 页可分配,
+                 * 第一个 2MB 映满后 L0#2 分配失败 -> 回滚 */
+                if (mappages(pt, 0x40000000, 0x400000, (uint64)victim, PTE_R | PTE_W) != -1)
+                    ok = 0;
+                if (walk(pt, 0x40000000, 0) != 0) ok = 0;        /* L1 已回收,无残留 */
+                if (walk(pt, 0x40200000, 0) != 0) ok = 0;
+                if (kpages_used() != v_used) ok = 0;             /* 中间页全回收 */
+                kfree(victim);   /* 若回滚误释放数据页,此处 double free 会 panic */
+            }
+            while (n > 0)
+                kfree(hold[--n]);
+            if (kpages_used() != before) ok = 0;                 /* 守恒 */
+        }
+        printf("vm selftest 2/3 rollback: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ③ unmappings:回收数据页并 prune 变空中间页 */
+        ok = 1;
+        unmappings(pt, 0x1000, 3 * PGSIZE, 1);
+        if (walk(pt, 0x1000, 0) != 0) ok = 0;
+        if (walk(pt, 0x3000, 0) != 0) ok = 0;
+        if (kpages_used() != base0 + 1) ok = 0;                  /* 仅剩根页表 */
+        unmappings(pt, 0x8000, 3 * PGSIZE, 1);                   /* 空洞区间:无副作用 */
+        if (kpages_used() != base0 + 1) ok = 0;
+        kfree(pt);
+        if (kpages_used() != base0) ok = 0;                      /* 完全守恒 */
+        printf("vm selftest 3/3 unmap+prune: %s\n", ok ? "PASS" : "FAIL");
         if (!ok) { intr_off(); while (1) {} }
     }
 #endif

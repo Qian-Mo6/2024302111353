@@ -14,4 +14,11 @@ uint64 kpages_cap(void);
 uint64 kpages_used(void);
 uint64 kpages_free(void);
 
+/* ============ lab3 阶段二 · SV39 页表核心操作接口 ============
+ * 使用方需先包含 riscv.h(pte_t/pagetable_t)。实现见 vm.c。 */
+pte_t *walk(pagetable_t pagetable, uint64 va, int alloc);
+pte_t *walklevel(pagetable_t pagetable, uint64 va, int level);
+int    mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm);
+void   unmappings(pagetable_t pagetable, uint64 va, uint64 size, int do_free);
+
 #endif // VM_H
