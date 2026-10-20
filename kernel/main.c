@@ -27,11 +27,11 @@
  * satp 后恒等映射可读写),正式构建置 0。 */
 #define LAB3_KVM_SELFTEST 0
 
-/* lab3 阶段四临时验证开关:1=上电自检用户地址空间
- * (uvmload 布局与段权限 / uvmcopy 物理隔离 / copyin-copyout / uvmfree 守恒 /
- * _uprog_meta 构建期元数据自洽)。
+/* lab3 阶段五临时验证开关:1=上电自检受控拷贝(copyin/copyout/copyinstr)。
+ * 覆盖跨页拼接、代码页写拒绝/读允许、guard 空洞、未映射地址、
+ * MAXVA 上界与溢出、零长度、copyinstr 跨页与无 NUL 超长。
  * 已验证 PASS(5/5),正式构建置 0。 */
-#define LAB3_UVM_SELFTEST 0
+#define LAB3_COPY_SELFTEST 0
 
 void consoleinit(void);
 void plicinit(void);
@@ -348,6 +348,127 @@ main(void)
             if (n == 0) ok = 0;
             printf("uvm selftest 5/5 meta(%d progs): %s\n", n, ok ? "PASS" : "FAIL");
             if (!ok) { intr_off(); while (1) {} }
+        }
+    }
+#endif
+
+#if LAB3_COPY_SELFTEST
+    /* 阶段五临时验证(验证通过后把上面的宏置 0 或删除本块):
+     * 用一页数据页(S)与两页代码/只读页(P0/P1)搭建最小用户空间,
+     * 覆盖 copyin/copyout/copyinstr 的跨页拼接、权限拒绝、空洞与上界检查。
+     * 页面物理地址从 PTE 反查,确保读写的确实是映射出去的那一页。 */
+    {
+        int ok = 1;
+        uint64 base0 = kpages_used();
+
+        pagetable_t t = uvmcreate();
+        char *spa = (char *)kalloc();                    /* 数据页:可写 */
+        char *spb = (char *)kalloc();                    /* 数据页2:跨页拼接 */
+        char *p0  = (char *)kalloc();                    /* 代码页0:RX */
+        char *p1  = (char *)kalloc();                    /* 代码页1:RX */
+        if (!t || !spa || !spb || !p0 || !p1) ok = 0;
+        if (ok && mappages(t, 0x0000, PGSIZE, (uint64)p0,
+                           PTE_R | PTE_X | PTE_U | PTE_A) != 0) ok = 0;
+        if (ok && mappages(t, 0x1000, PGSIZE, (uint64)p1,
+                           PTE_R | PTE_X | PTE_U | PTE_A) != 0) ok = 0;
+        uint64 sva = 0x2000 + LAB3_GUARD_PAGES * PGSIZE;      /* 数据页 VA */
+        uint64 gva = 0x2000;                                  /* guard 首 VA */
+        if (ok && mappages(t, sva, PGSIZE, (uint64)spa,
+                           PTE_R | PTE_W | PTE_U | PTE_A | PTE_D) != 0) ok = 0;
+        if (ok && mappages(t, sva + PGSIZE, PGSIZE, (uint64)spb,
+                           PTE_R | PTE_W | PTE_U | PTE_A | PTE_D) != 0) ok = 0;
+
+        char kbuf[16], rbuf[16];
+
+        /* ① copyout/copyin 基本往返 */
+        if (ok) {
+            for (int i = 0; i < 16; i++) { kbuf[i] = (char)(0x30 + i); rbuf[i] = 0; }
+            if (copyout(t, sva, kbuf, 16) != 0) ok = 0;
+            if (copyin(t, rbuf, sva, 16) != 0) ok = 0;
+            for (int i = 0; i < 16; i++)
+                if (rbuf[i] != (char)(0x30 + i)) { ok = 0; break; }
+        }
+        printf("copy selftest 1/5 basic: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ② 跨页:从第一页尾部 8 字节起写 16 字节,跨入第二页;
+         *    回读一致证明逐页拼接正确。再越出第二页 1 字节 → 必须失败。 */
+        {
+            int c1 = 1, c2 = 1;
+            if (ok) {
+                for (int i = 0; i < 16; i++) kbuf[i] = (char)(0xA0 + i);
+                if (copyout(t, sva + PGSIZE - 8, kbuf, 16) != 0) c1 = 0;
+                if (copyin(t, rbuf, sva + PGSIZE - 8, 16) != 0) c1 = 0;
+                for (int i = 0; i < 16; i++)
+                    if (rbuf[i] != (char)(0xA0 + i)) c1 = 0;
+                /* 越出第二页尾 1 字节:第三页未映射,必须失败 */
+                if (copyout(t, sva + 2 * PGSIZE - 4, kbuf, 8) == 0) c2 = 0;
+                if (copyin(t, rbuf, sva + 2 * PGSIZE - 4, 8) == 0) c2 = 0;
+            } else { c1 = c2 = 0; }
+            if (!c1 || !c2) ok = 0;
+        }
+        printf("copy selftest 2/5 cross-page: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ③ 权限:代码页 copyout 拒绝、copyin 允许;guard 与未映射地址均拒绝 */
+        {
+            int a = 1, b = 1, c = 1, d = 1;
+            if (ok) {
+                if (copyout(t, 0x0000, kbuf, 16) == 0) a = 0;    /* 代码页无 W */
+                if (copyin(t, rbuf, 0x0000, 16) != 0) b = 0;     /* 代码页可读 */
+                if (copyout(t, gva, kbuf, 16) == 0) c = 0;       /* guard 空洞 */
+                if (copyin(t, rbuf, gva, 16) == 0) c = 0;
+                if (copyout(t, 0x900000, kbuf, 16) == 0) d = 0;  /* 高地址未映射 */
+                if (copyin(t, rbuf, 0x900000, 16) == 0) d = 0;
+            } else { a = b = c = d = 0; }
+            if (!a || !b || !c || !d) ok = 0;
+        }
+        printf("copy selftest 3/5 perms/holes: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ④ 上界与溢出:MAXVA 附近与加法回绕必须拒绝,零长度必须成功 */
+        {
+            int a = 1, b = 1, c = 1, d = 1;
+            if (ok) {
+                if (copyin(t, rbuf, MAXVA, 16) == 0) a = 0;              /* VA=MAXVA 非法 */
+                if (copyout(t, MAXVA - 4, kbuf, 16) == 0) b = 0;         /* 跨界 MAXVA 非法 */
+                if (copyin(t, rbuf, ~0UL - 4, 16) == 0) c = 0;           /* 回绕非法 */
+                if (copyout(t, sva, kbuf, 0) != 0) d = 0;               /* 零长度成功 */
+                if (copyin(t, rbuf, sva, 0) != 0) d = 0;
+                if (copyinstr(t, rbuf, MAXVA, 8) == 0) d = 0;           /* copyinstr 越界 */
+            } else { a = b = c = d = 0; }
+            if (!a || !b || !c || !d) ok = 0;
+        }
+        printf("copy selftest 4/5 bounds: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ⑤ copyinstr:跨页拼接(字符串起始于页尾、NUL 在下一页);
+         *    无 NUL 超长 → -1。用代码页 P0/P1 两页构造。 */
+        {
+            int a = 1, b = 1;
+            if (ok) {
+                /* P0 页尾写 'x','y',P1 页首写 'z',0 */
+                p0[PGSIZE - 2] = 'x';
+                p0[PGSIZE - 1] = 'y';
+                p1[0] = 'z';
+                p1[1] = '\0';
+                for (int i = 0; i < 16; i++) rbuf[i] = 0x7f;
+                if (copyinstr(t, rbuf, PGSIZE - 2, 16) != 0) a = 0;     /* 跨 P0→P1 */
+                if (rbuf[0] != 'x' || rbuf[1] != 'y' || rbuf[2] != 'z' || rbuf[3] != 0)
+                    a = 0;
+                /* 无 NUL:P1 全非 0,限长 4 → 失败 */
+                p1[0] = 'q'; p1[1] = 'q'; p1[2] = 'q'; p1[3] = 'q'; p1[4] = 'q';
+                if (copyinstr(t, rbuf, PGSIZE, 4) == 0) b = 0;
+            } else { a = b = 0; }
+            if (!a || !b) ok = 0;
+        }
+        printf("copy selftest 5/5 copyinstr: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        uvmfree(t, sva + 2 * PGSIZE);
+        if (kpages_used() != base0) {
+            printf("copy selftest: free not conserved\n");
+            intr_off(); while (1) {}
         }
     }
 #endif

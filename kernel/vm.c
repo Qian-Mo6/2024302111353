@@ -306,12 +306,29 @@ uvmfree(pagetable_t pt, uint64 sz)
     kfree((void *)pt);
 }
 
+/* va_ok:用户地址区间 [va, va+len) 合法(不越过 MAXVA、不溢出)
+ * walk 本身只按 9+9+9 位取索引,越界 VA 会落到高地址页表项上,
+ * 必须在入口显式拒绝,避免把内核结构/未定义区域当成用户页访问。 */
+static int
+va_ok(uint64 va, uint64 len)
+{
+    if (va >= MAXVA)
+        return 0;
+    if (len > 0 && va + len - 1 < va)      /* 加法回绕 */
+        return 0;
+    if (len > 0 && va + len - 1 >= MAXVA)
+        return 0;
+    return 1;
+}
+
 /* copyin:从用户地址 srcva 拷 len 字节到内核 dst(跨页逐页翻译)
  * 页不存在或无 U 位返回 -1。经 PTE 得物理地址后走内核恒等映射,
  * 不需要 SSTATUS_SUM。 */
 int
 copyin(pagetable_t pt, char *dst, uint64 srcva, uint64 len)
 {
+    if (!va_ok(srcva, len))
+        return -1;
     while (len > 0) {
         uint64 va0 = PGROUNDDOWN(srcva);
         pte_t *pte = walk(pt, va0, 0);
@@ -332,6 +349,8 @@ copyin(pagetable_t pt, char *dst, uint64 srcva, uint64 len)
 int
 copyout(pagetable_t pt, uint64 dstva, char *src, uint64 len)
 {
+    if (!va_ok(dstva, len))
+        return -1;
     while (len > 0) {
         uint64 va0 = PGROUNDDOWN(dstva);
         pte_t *pte = walk(pt, va0, 0);
@@ -353,6 +372,8 @@ copyout(pagetable_t pt, uint64 dstva, char *src, uint64 len)
 int
 copyinstr(pagetable_t pt, char *dst, uint64 srcva, uint64 max)
 {
+    if (!va_ok(srcva, max))
+        return -1;
     while (max > 0) {
         uint64 va0 = PGROUNDDOWN(srcva);
         pte_t *pte = walk(pt, va0, 0);
