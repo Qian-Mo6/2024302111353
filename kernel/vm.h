@@ -43,6 +43,11 @@ int    copyin(pagetable_t pt, char *dst, uint64 srcva, uint64 len);
 int    copyout(pagetable_t pt, uint64 dstva, char *src, uint64 len);
 int    copyinstr(pagetable_t pt, char *dst, uint64 srcva, uint64 max);
 
+/* 页表观测(dump_pagetable-ABI.md):按 va 升序逐行输出 L2/L1/LEAF,
+ * perm 为 R/W/X/U 四位(未置位用 '-'),A/D 不输出。
+ * 不绑定单一进程:调用方传入任意用户页表即可重放。 */
+void   dump_pagetable(pagetable_t pt);
+
 /* 进程内核栈:内核页表 KSTACK(idx) 高地址映射(与 lab0 快照图一致),
  * 下方留一页不映射作溢出保护。kstack_map 返回栈顶 VA,失败返回 0。 */
 uint64 kstack_map(int idx);

@@ -27,6 +27,10 @@
  * satp 后恒等映射可读写),正式构建置 0。 */
 #define LAB3_KVM_SELFTEST 0
 
+/* lab3 阶段四临时验证开关:1=上电自检用户地址空间(布局/深拷贝/受控拷贝/回收)。
+ * 已验证 PASS(5/5),正式构建置 0(保留宏名供历史对照)。 */
+#define LAB3_UVM_SELFTEST 0
+
 /* lab3 阶段五临时验证开关:1=上电自检受控拷贝(copyin/copyout/copyinstr)。
  * 覆盖跨页拼接、代码页写拒绝/读允许、guard 空洞、未映射地址、
  * MAXVA 上界与溢出、零长度、copyinstr 跨页与无 NUL 超长。
@@ -593,6 +597,10 @@ main(void)
     p->sz = istack_va + PGSIZE;
     p->trapframe->epc = code_off;
     p->trapframe->sp  = p->sz;
+
+    /* 页表观测 ABI:首个用户进程页表装配完成后自动打印一次;
+     * dump_pagetable(pagetable_t) 不绑定单一进程,可供现场重放。 */
+    dump_pagetable(p->pagetable);
 
     printf("user_epc=%x sz=%x trampoline=%x tf=%x\n",
            p->trapframe->epc, p->sz, trampoline_pa, (uint64)p->trapframe);

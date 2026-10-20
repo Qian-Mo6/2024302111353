@@ -444,6 +444,68 @@ copyinstr(pagetable_t pt, char *dst, uint64 srcva, uint64 max)
     return -1;                              /* max 内未见 NUL */
 }
 
+/* ============ lab3 收尾 · 页表观测 dump_pagetable ============
+ * 输出格式严格遵循 gifts/dump_pagetable-ABI.md:
+ *   DUMP-PAGETABLE begin
+ *   L2   va=0x..0 pa=0x..0 perm=----      (非叶表项)
+ *   L1   va=0x..0 pa=0x..0 perm=----
+ *   LEAF va=0x..0 pa=0x..0 perm=rw-u      (叶子页表项)
+ *   DUMP-PAGETABLE end
+ * perm 依次按 R/W/X/U 四位输出,未置位用 '-' 占位;
+ * A/D 属硬件运行时状态位,不进入 perm(验收时口头说明)。
+ * va 为该表项管辖区间的起始地址;逐级按 index 递增遍历,输出天然升序。
+ * 函数不绑定单一进程:调用方传入任意 pagetable 均可重放。 */
+
+/* dump_perm:把 PTE 权限位转成 "rwxu" 四位字符串(未置位为 '-') */
+static void
+dump_perm(int flags, char *buf)
+{
+    buf[0] = (flags & PTE_R) ? 'r' : '-';
+    buf[1] = (flags & PTE_W) ? 'w' : '-';
+    buf[2] = (flags & PTE_X) ? 'x' : '-';
+    buf[3] = (flags & PTE_U) ? 'u' : '-';
+    buf[4] = '\0';
+}
+
+/* dump_level:递归输出某级页表
+ *   level=2 根表、1 L1 表、0 L0 表;
+ *   base 为本级第 0 项管辖区间的起始 VA。
+ * 叶子判定:R/W/X 任一置位即为叶子(含 L1 2MB / L2 1GB 超级页)。 */
+static void
+dump_level(pagetable_t pt, int level, uint64 base)
+{
+    for (int i = 0; i < 512; i++) {
+        uint64 va = base | ((uint64)i << (12 + 9 * level));
+        pte_t pte = pt[i];
+        if ((pte & PTE_V) == 0)
+            continue;
+
+        char perm[5];
+        dump_perm((int)PTE_FLAGS(pte), perm);
+
+        if (pte & (PTE_R | PTE_W | PTE_X)) {
+            printf("LEAF va=%x pa=%x perm=%s\n", va, PTE2PA(pte), perm);
+        } else if (level > 0) {
+            printf("L%d va=%x pa=%x perm=----\n", level, va, PTE2PA(pte));
+            dump_level((pagetable_t)PTE2PA(pte), level - 1, va);
+        } else {
+            /* L0 项必须为叶子,V 置位却无 RWX 属非法表项,按叶子原样输出 */
+            printf("LEAF va=%x pa=%x perm=%s\n", va, PTE2PA(pte), perm);
+        }
+    }
+}
+
+/* dump_pagetable:输出一个 SV39 页表的全部有效表项 */
+void
+dump_pagetable(pagetable_t pt)
+{
+    if (!pt)
+        return;
+    printf("DUMP-PAGETABLE begin\n");
+    dump_level(pt, 2, 0);
+    printf("DUMP-PAGETABLE end\n");
+}
+
 /* kstack_map:为进程槽 idx 在内核页表 KSTACK(idx) 高地址建内核栈映射
  * (lab0 快照图布局:栈页下方留一页不映射作溢出保护)。
  * 返回栈顶 VA(KSTACK(idx)+PGSIZE);失败返回 0。 */
