@@ -306,6 +306,57 @@ uvmfree(pagetable_t pt, uint64 sz)
     kfree((void *)pt);
 }
 
+/* ============ lab3 阶段六 · sbrk EAGER 增长/收缩 ============ */
+
+/* uvmalloc:把用户地址空间从 oldsz 增长到 newsz(EAGER 语义)
+ * 为 [PGROUNDUP(oldsz), PGROUNDUP(newsz)) 逐页 kalloc 并建立 RWU 映射。
+ * 失败(配额耗尽/中间页分配失败/越过 TRAPFRAME)返回 -1,并完整回滚:
+ * 本次已建映射的数据页经 unmappings 回收、变空的中间页由 prune 回收,
+ * p->sz 由调用方保持不变,进程可继续运行。
+ * VA 上界:堆顶不得达到 TRAPFRAME(该页是内核所有的陷入现场页,
+ * 用户页表在此处只有 RW 无 U;继续增长会 remap panic)。 */
+int
+uvmalloc(pagetable_t pt, uint64 oldsz, uint64 newsz)
+{
+    if (newsz < oldsz)                      /* 回绕:非法增长请求 */
+        return -1;
+    if (newsz == oldsz)
+        return 0;
+    if (PGROUNDUP(newsz) > TRAPFRAME)       /* 越过内核固定映射区 */
+        return -1;
+
+    uint64 start = PGROUNDUP(oldsz);
+    for (uint64 va = start; va < newsz; va += PGSIZE) {
+        char *mem = (char *)kalloc();
+        if (!mem)
+            goto fail;
+        if (mappages(pt, va, PGSIZE, (uint64)mem,
+                     PTE_R | PTE_W | PTE_U | PTE_A | PTE_D) != 0) {
+            kfree(mem);
+            goto fail;
+        }
+    }
+    return 0;
+
+fail:
+    /* 空洞跳过语义:可安全回收 [start, newsz) 内本次已建的部分 */
+    unmappings(pt, start, newsz - start, 1);
+    return -1;
+}
+
+/* uvmdealloc:把用户地址空间从 oldsz 收缩到 newsz
+ * 只拆除整页 [PGROUNDUP(newsz), oldsz),回收数据物理页;
+ * newsz 所在页内保留(其低地址部分仍属用户空间)。
+ * 调用方保证 newsz < oldsz(本函数不再重复校验)。 */
+int
+uvmdealloc(pagetable_t pt, uint64 oldsz, uint64 newsz)
+{
+    uint64 start = PGROUNDUP(newsz);
+    if (start < oldsz)
+        unmappings(pt, start, oldsz - start, 1);
+    return 0;
+}
+
 /* va_ok:用户地址区间 [va, va+len) 合法(不越过 MAXVA、不溢出)
  * walk 本身只按 9+9+9 位取索引,越界 VA 会落到高地址页表项上,
  * 必须在入口显式拒绝,避免把内核结构/未定义区域当成用户页访问。 */

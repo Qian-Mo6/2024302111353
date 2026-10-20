@@ -32,6 +32,13 @@ int    uvmload(pagetable_t pt, char *img, uint64 filesz,
                uint64 wstart, uint64 memsz, uint64 *szp, uint64 *spp);
 int    uvmcopy(pagetable_t oldpt, pagetable_t newpt, uint64 sz);
 void   uvmfree(pagetable_t pt, uint64 sz);
+
+/* 地址空间动态增长(sbrk EAGER):
+ * uvmalloc 为 [oldsz,newsz) 逐页分配物理页并建 RWU 映射,
+ * 返回 0 成功;-1 失败(本次已建映射与数据页完整回滚,内核不 panic)。
+ * uvmdealloc 拆除 [PGROUNDUP(newsz),oldsz) 并回收数据页,返回 0。 */
+int    uvmalloc(pagetable_t pt, uint64 oldsz, uint64 newsz);
+int    uvmdealloc(pagetable_t pt, uint64 oldsz, uint64 newsz);
 int    copyin(pagetable_t pt, char *dst, uint64 srcva, uint64 len);
 int    copyout(pagetable_t pt, uint64 dstva, char *src, uint64 len);
 int    copyinstr(pagetable_t pt, char *dst, uint64 srcva, uint64 max);

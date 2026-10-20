@@ -33,6 +33,12 @@
  * 已验证 PASS(5/5),正式构建置 0。 */
 #define LAB3_COPY_SELFTEST 0
 
+/* lab3 阶段六临时验证开关:1=上电自检 sbrk 的 uvmalloc/uvmdealloc。
+ * 覆盖 EAGER 增长(RWU 映射 + 可写)、收缩回收、TRAPFRAME 上界拒绝、
+ * 配额不足时分配中途失败的回滚守恒。
+ * 已验证 PASS(4/4),正式构建置 0。 */
+#define LAB3_SBRK_SELFTEST 0
+
 void consoleinit(void);
 void plicinit(void);
 void printf(char *fmt, ...);
@@ -58,7 +64,7 @@ __asm__(
     ".global _user_test\n"
     "_user_test:\n"
     "    # exec(\"sh\", 0) 加载并运行 sh\n"
-    "    li a7, 9\n"            /* SYS_exec */
+    "    li a7, 7\n"            /* SYS_exec(与 kernel/syscall.h 一致) */
     "    la a0, name\n"         /* name 指向 "sh" */
     "    li a1, 0\n"            /* argv = 0,lab2 忽略 */
     "    ecall\n"
@@ -470,6 +476,90 @@ main(void)
             printf("copy selftest: free not conserved\n");
             intr_off(); while (1) {}
         }
+    }
+#endif
+
+#if LAB3_SBRK_SELFTEST
+    /* 阶段六临时验证(验证通过后把上面的宏置 0):
+     * ① uvmalloc 增长 3 页:叶子 PTE 为 RWU,且经 copyout/copyin 往返一致;
+     * ② uvmdealloc 收缩到 1 页:尾部两页 PTE 清除(物理页已回收),首页保留;
+     * ③ 上界:增长越过 TRAPFRAME 必须立即失败,不产生映射与占用;
+     * ④ 回滚:留 2 页空闲后请求 4 页,第 3 页 kalloc 失败,
+     *    前 2 页映射与中间页必须完整回滚,used 守恒。 */
+    {
+        int ok = 1;
+        uint64 base0 = kpages_used();
+
+        pagetable_t t = uvmcreate();
+        if (!t) ok = 0;
+
+        /* ① EAGER 增长 */
+        if (ok && uvmalloc(t, 0, 3 * PGSIZE) != 0) ok = 0;
+        if (ok) {
+            char w[8] = {1, 2, 3, 4, 5, 6, 7, 8}, r[8];
+            for (int i = 0; i < 3 && ok; i++) {
+                uint64 va = (uint64)i * PGSIZE;
+                pte_t *e = walk(t, va, 0);
+                if (!e || (*e & PTE_V) == 0) { ok = 0; break; }
+                if ((*e & (PTE_R | PTE_W | PTE_U)) !=
+                    (PTE_R | PTE_W | PTE_U)) ok = 0;
+                if (copyout(t, va, w, 8) != 0) ok = 0;
+                for (int j = 0; j < 8; j++) r[j] = 0;
+                if (copyin(t, r, va, 8) != 0) ok = 0;
+                for (int j = 0; j < 8; j++)
+                    if (r[j] != w[j]) ok = 0;
+            }
+        }
+        printf("sbrk selftest 1/4 grow: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ② 收缩:只保留首页 */
+        if (uvmdealloc(t, 3 * PGSIZE, PGSIZE) != 0) ok = 0;
+        {
+            pte_t *e0 = walk(t, 0, 0);
+            pte_t *e1 = walk(t, PGSIZE, 0);
+            pte_t *e2 = walk(t, 2 * PGSIZE, 0);
+            if (!e0 || (*e0 & PTE_V) == 0) ok = 0;
+            if (e1 && (*e1 & PTE_V)) ok = 0;
+            if (e2 && (*e2 & PTE_V)) ok = 0;
+        }
+        printf("sbrk selftest 2/4 shrink: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ③ 上界:越过 TRAPFRAME 立即失败,零副作用 */
+        {
+            uint64 before = kpages_used();
+            if (uvmalloc(t, PGSIZE, TRAPFRAME + PGSIZE) == 0) ok = 0;
+            if (kpages_used() != before) ok = 0;
+            pte_t *e = walk(t, PGSIZE, 0);
+            if (e && (*e & PTE_V)) ok = 0;
+        }
+        printf("sbrk selftest 3/4 bound: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
+
+        /* ④ 配额不足:分配中途失败必须完整回滚 */
+        {
+            uint64 steady = kpages_used();
+            static void *hold[(PHYSTOP - KERNBASE) / PGSIZE];
+            uint64 n = 0;
+            while (kpages_free() > 2) {
+                void *q = kalloc();
+                if (!q) break;
+                hold[n++] = q;
+            }
+            uint64 before = kpages_used();
+            if (uvmalloc(t, PGSIZE, PGSIZE + 4 * PGSIZE) == 0) ok = 0;
+            if (kpages_used() != before) ok = 0;         /* 已分配部分全回滚 */
+            pte_t *e = walk(t, PGSIZE, 0);
+            if (e && (*e & PTE_V)) ok = 0;
+            while (n > 0)
+                kfree(hold[--n]);
+            if (kpages_used() != steady) ok = 0;         /* 释放后守恒 */
+        }
+        uvmfree(t, PGSIZE);
+        if (kpages_used() != base0) ok = 0;
+        printf("sbrk selftest 4/4 rollback: %s\n", ok ? "PASS" : "FAIL");
+        if (!ok) { intr_off(); while (1) {} }
     }
 #endif
 

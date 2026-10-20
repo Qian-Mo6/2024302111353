@@ -184,6 +184,43 @@ sys_exec(void)
     return -1;  /* 未找到程序 */
 }
 
+/* sys_sbrk(n, strategy):地址空间动态增长(EAGER)
+ *   a0 = 增减字节数(有符号),a1 = 策略(SBRK_EAGER/SBRK_LAZY)
+ * 语义:
+ *   n > 0:EAGER 立即为新增区间分配物理页并建立 RWU 映射;
+ *   n < 0:收缩边界并回收整页;
+ *   n = 0:仅查询当前边界。
+ * 返回增长前的边界(即新分配区首地址,用户库与官方测试按此使用);
+ * 失败返回 -1:uvmalloc 已把本次分配完整回滚,配额耗尽或越过
+ * TRAPFRAME 均只报错,内核不 panic。
+ * SBRK_LAZY 在 lab3 按 EAGER 执行(缺页按需分配留待 lab5)。 */
+static uint64
+sys_sbrk(void)
+{
+    struct proc *p = myproc();
+    long n = (long)p->trapframe->a0;
+    uint64 strategy = p->trapframe->a1;
+
+    (void)strategy;                  /* lab3:LAZY 请求同样按 EAGER 分配 */
+
+    uint64 oldsz = p->sz;
+    if (n > 0) {
+        uint64 grow = (uint64)n;
+        if (oldsz + grow < oldsz)                    /* 加法回绕 */
+            return -1;
+        if (uvmalloc(p->pagetable, oldsz, oldsz + grow) != 0)
+            return -1;
+        p->sz = oldsz + grow;
+    } else if (n < 0) {
+        uint64 shrink = (uint64)0 - (uint64)n;       /* 避免 -LONG_MIN 溢出 */
+        if (shrink > oldsz)                          /* 收缩越过地址空间起点 */
+            return -1;
+        uvmdealloc(p->pagetable, oldsz, oldsz - shrink);
+        p->sz = oldsz - shrink;
+    }
+    return oldsz;
+}
+
 /* sys_fork:创建子进程(调用 proc.c 的 fork)
  * fork 内部会切换 curproc 到子进程
  * 返回子 pid 给父进程 trapframe->a0(由 syscall() 设置) */
@@ -231,6 +268,9 @@ syscall(void)
         break;
     case SYS_wait:
         p->trapframe->a0 = sys_wait();
+        break;
+    case SYS_sbrk:
+        p->trapframe->a0 = sys_sbrk();
         break;
     default:
         p->trapframe->a0 = -1;
