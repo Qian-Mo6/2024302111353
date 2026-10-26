@@ -31,6 +31,7 @@ clean:
 # ============ lab2 升级规则 ============
 # lab3: 追加官方测试 badaccess(越界终止) 与 memcap(内存上限/OOM)
 UPROGS = sh hi spin badecall bufstorm badaccess memcap
+UPROGS += bench lottery_test stride_test
 
 UFLAGS = -Wall -Werror -O -std=gnu99 -mcmodel=medany -ffreestanding \
          -nostdlib -fno-common -ggdb -march=rv64gc \
