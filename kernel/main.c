@@ -600,7 +600,8 @@ main(void)
 
     /* 页表观测 ABI:首个用户进程页表装配完成后自动打印一次;
      * dump_pagetable(pagetable_t) 不绑定单一进程,可供现场重放。 */
-    dump_pagetable(p->pagetable);
+    /* 阶段 1 调试:暂时注释,避免干扰 scheduler 路径 */
+    /* dump_pagetable(p->pagetable); */
 
     printf("user_epc=%x sz=%x trampoline=%x tf=%x\n",
            p->trapframe->epc, p->sz, trampoline_pa, (uint64)p->trapframe);
@@ -658,11 +659,19 @@ main(void)
     /* 阶段四:独立用户页表后内核经 copyin/copyout 访问用户内存,
      * 不再需要 SSTATUS_SUM(内核不解引用用户 VA),移除 lab2 的 SUM 设置。 */
 
-    printf("satp OK, going to U mode...\n");
-    printf("_user_test: exec(\"sh\", 0) -> shell\n");
+    /* lab4 阶段 1:不再直接 usertrapret 进 U 态,改为
+     *   curproc = 首进程、state = RUNNABLE、调 scheduler()。
+     * scheduler 选到它后设 state = RUNNING,swtch 从其 context
+     *   (ra = forkret,sp = kstack)进入;forkret 再调 usertrapret
+     *   进 U 态——与子进程首次启动走的是同一条路径,调度器统一管理。 */
+    printf("satp OK, scheduler starting...\n");
 
-    usertrapret();
+    extern struct proc *curproc;
+    curproc = p;
+    p->state = RUNNABLE;    /* 首次让 scheduler 选中 */
 
-    printf("ERROR: returned from usertrapret\n");
+    scheduler();
+
+    printf("ERROR: returned from scheduler\n");
     while (1) {}
 }

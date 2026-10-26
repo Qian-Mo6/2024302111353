@@ -10,7 +10,7 @@ OBJDUMP ?= riscv64-unknown-elf-objdump
 NM      ?= riscv64-unknown-elf-nm
 
 OBJS = kernel/entry.o kernel/start.o kernel/console.o kernel/printf.o kernel/main.o \
-       kernel/proc.o kernel/trap.o kernel/syscall.o kernel/vm.o kernel/kalloc.o kernel/trampoline.o kernel/kernelvec.o kernel/userimg.o kernel/plic.o
+       kernel/proc.o kernel/trap.o kernel/syscall.o kernel/vm.o kernel/kalloc.o kernel/swtch.o kernel/trampoline.o kernel/kernelvec.o kernel/userimg.o kernel/plic.o
 
 kernel/kernel: $(OBJS) kernel/kernel.ld
 	$(LD) -T kernel/kernel.ld -o $@ $(OBJS)

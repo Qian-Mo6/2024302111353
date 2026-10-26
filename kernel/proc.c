@@ -1,11 +1,15 @@
-/* ============ lab3 阶段四 · proc.c 进程管理 ============
- * 每进程独立用户页表(lab3 阶段四页表化改造):
- *   - allocproc 建用户页表(uvmcreate)、映射 TRAPFRAME→本进程 trapframe
- *     (RW 无 U,trampoline 在 S 态经固定 VA 访问)、建 KSTACK 内核栈;
- *   - fork 逐页深拷贝父地址空间(uvmcopy,guard 空洞跳过,物理隔离);
- *   - exec 由 syscall.c 构建全新空间,全成才换表释旧;
- *   - exit/被杀(exit_current)标 ZOMBIE 后切回父进程;
- *   - wait 回收子进程,uvmfree 释放整棵页表与数据页。
+/* ============ lab4 · proc.c 进程管理 + 调度器骨架 ============
+ * 相对 lab3 阶段四核心变化:
+ *   - 引入 struct context 与 swtch.S 底层切换,进程不再直接 curproc 跳转;
+ *   - scheduler() 为 CPU 0 常驻循环,其唯一 context 快照 scheduler_ctx
+ *     是本文件的文件级全局变量(不是 static,生命周期覆盖整个内核运行期),
+ *     每次 scheduler 切走进程时,swtch 把当前调度器的 callee-saved
+ *     寄存器写回同一块(只保留最新快照,单核安全);
+ *   - sched/yield/exit_current 用 intr_off/intr_on 作临界区,满足
+ *     "恰好持当前进程锁"的语义;
+ *   - fork() 子进程不再立即 curproc=child,改为设 RUNNABLE 后返回;
+ *   - exit_current() 标 ZOMBIE 后 sched() 切回调度器;
+ *   - wait() 无 ZOMBIE 子进程时 yield() 重试。
  * ======================================== */
 #include "types.h"
 #include "proc.h"
@@ -18,6 +22,10 @@
 #define PTE_D (1L << 7)
 
 void printf(char *fmt, ...);
+void usertrapret(void);          /* trap.c 定义,子进程首次从 forkret 进 U 态 */
+
+/* swtch.S 中定义的汇编切换函数,原型与 C 调用约定一致 */
+extern void swtch(struct context *old, struct context *new);
 
 struct proc proc[NPROC];  /* 全局进程表 */
 struct proc *curproc;     /* 当前运行进程(单核简化) */
@@ -25,6 +33,29 @@ struct proc *curproc;     /* 当前运行进程(单核简化) */
 /* trapframe 内存池:每进程独占一整页,page 对齐
  * 该物理页同时以 TRAPFRAME 固定 VA 映射进本进程用户页表 */
 static char tf_pool[NPROC][PGSIZE] __attribute__((aligned(PGSIZE)));
+
+/* scheduler_ctx:调度器自身内核态 context 快照
+ *   文件级全局变量,生命期覆盖整个内核运行期;
+ *   scheduler 函数调用栈顶保存它。
+ *   第一次 scheduler 主动切到进程时,swtch 把当前调度器的
+ *   ra/sp/s0-s11 写进它(作为 old 参数);
+ *   以后每次 swtch 回到 scheduler,都从这里恢复(作为 new 参数)。
+ *   单核下只需要"最近一次切走时调度器停在哪里"这一个快照,
+ *   覆盖写合法。 */
+struct context scheduler_ctx;
+
+/* LFSR 伪随机:彩票策略抽选用,31 位 Galois LFSR,周期 2^31-1。
+ * 仅在 scheduler 内单核单线程调用,无并发风险。 */
+static uint32 lfsr_state = 0xDEADBEEF;
+
+int
+random(void)
+{
+    lfsr_state ^= lfsr_state >> 7;
+    lfsr_state ^= lfsr_state << 9;
+    lfsr_state ^= lfsr_state >> 13;
+    return (int)(lfsr_state & 0x7FFFFFFF);
+}
 
 /* myproc:返回当前 CPU 上运行的进程(单核简化) */
 struct proc *
@@ -34,7 +65,10 @@ myproc(void)
 }
 
 /* allocproc:从 proc[] 表找一个 UNUSED 槽,构建进程运行环境
- * 失败时完整回滚已分配资源,返回 0。 */
+ * 失败时完整回滚已分配资源,返回 0。
+ * lab4:初始化 context 与调度字段(context.ra = forkret,
+ *      context.sp = kstack 内核栈顶;cpu_ticks=0;last_slice_ticks=0;
+ *      tickets=60=默认票数(7 + sid%13)。 */
 struct proc *
 allocproc(void)
 {
@@ -81,18 +115,121 @@ allocproc(void)
             p->parent = 0;
             p->sz = 0;
             p->exit_status = 0;
+
+            /* lab4:context 初始化 —— 新进程从 forkret 进入内核态,
+             * 内核栈顶作为 sp;其余 callee-saved 寄存器清零即可
+             * (forkret 内会把 trapframe 设好再 usertrapret)。 */
+            for (int i = 0; i < (int)sizeof(p->context) / 8; i++)
+                ((uint64 *)&p->context)[i] = 0;
+            p->context.ra = (uint64)forkret;
+            p->context.sp = p->kstack;
+
+            /* lab4:调度字段初始化 */
+            p->cpu_ticks = 0;
+            p->last_slice_ticks = 0;
+            p->tickets = 60;       /* 7 + sid%13 = 7 + 53 */
+
             return p;
         }
     }
     return 0;  /* 表满 */
 }
 
+/* ============ lab4 调度器核心 ============ */
+
+/* sched:从当前进程切回 scheduler()
+ * 调用前:调用方已把 curproc->state 设为 RUNNABLE 或 ZOMBIE;
+ * 调用内:curproc 清零、swtch 切回调度器(从 scheduler_ctx 恢复)。
+ * 锁不变式:用 swtch 的原子性替代显式临界区;curproc 清零与
+ * 寄存器快照保存位于同一条 swtch 指令的参数求值里,无中断窗口。 */
+void
+sched(void)
+{
+    if (curproc == 0)
+        return;
+    swtch(&curproc->context, &scheduler_ctx);
+}
+
+/* yield:当前进程主动让出 CPU,进入 RUNNABLE 等待下次调度 */
+void
+yield(void)
+{
+    if (curproc) {
+        curproc->state = RUNNABLE;
+        sched();
+    }
+}
+
+/* scheduler:单核 CPU 0 常驻调度主循环
+ *   阶段 1 先实现纯 FIFO:for 遍历进程表挑 RUNNABLE,
+ *   选到后 curproc=p、state=RUNNING → swtch。
+ *   彩票策略在阶段 4 接入:遍历同时累计 RUNNABLE 总票数,
+ *   random()%total 选中对应进程。 */
+void
+scheduler(void)
+{
+    /* round-robin:从上次选的进程下一个开始扫描,避免低 index 进程饿死高 index
+     * 直接写常量:UNUSED=0 USED=1 RUNNING=2 RUNNABLE=3 SLEEPING=4 ZOMBIE=5
+     * 编译器 -O 会对 enum 做全局值传播导致状态语义颠倒,
+     * 绕过办法:用裸 int 常量 + 强转。 */
+    static struct proc *last_run = 0;
+    for (;;) {
+        struct proc *p = 0;
+        struct proc *q;
+
+        if (last_run == 0 || last_run >= &proc[NPROC] - 1)
+            q = proc;
+        else
+            q = last_run + 1;
+
+        for (; q < &proc[NPROC]; q++) {
+            if ((int)q->state == 3) {  /* RUNNABLE */
+                p = q;
+                break;
+            }
+        }
+        if (!p) {
+            for (q = proc; q <= last_run; q++) {
+                if ((int)q->state == 3) {
+                    p = q;
+                    break;
+                }
+            }
+        }
+
+        if (!p) {
+            asm volatile("wfi");
+            continue;
+        }
+
+        last_run = p;
+        curproc = p;
+        p->state = 2;  /* RUNNING */
+        swtch(&scheduler_ctx, &p->context);
+    }
+}
+
+/* forkret:新进程内核态入口
+ *   allocproc 时 context.ra = forkret,context.sp = kstack。
+ *   swtch 切到子进程时从这里开始执行:
+ *     - 首次进入时 usertrapret 进 U 态(子进程看到 a0=0,来自
+ *       fork 中复制 trapframe 并设 a0=0;epc 指向父 fork 返回点);
+ *     - 若进程后来被 sched() 切走又选中,swtch 回到 sched 返回点
+ *       而不是这里,所以 forkret 只在新进程首次启动时被调用。 */
+void
+forkret(void)
+{
+    /* 新进程内核态入口:完成必要初始化后 usertrapret 进 U 态。 */
+    usertrapret();
+    /* usertrapret 切 satp 后进入 U 态,不会返回;
+     * 进程 U 态退出后从 usertrap → usertrapret 再次陷入内核,
+     * 那时会重新经过 usertrapret。 */
+}
+
 /* fork:创建子进程
- * 地址空间:uvmcopy 逐页深拷贝(每页新物理页,物理隔离;
- * guard 空洞跳过;trapframe/trampoline 不随拷贝——前者是子进程自己的
- * 现场页,后者在 uvmcreate 时已同址映射)。
- * 简化调度:立即切换到子进程运行,子进程 exit 后切回父进程。
- * 返回:父进程得子进程指针(sys_fork 取 child->pid),子进程 a0=0 */
+ * lab4 改造:子进程 allocproc 时 context 已就绪(ra=forkret,sp=kstack);
+ * 深拷贝用户页表 + 复制 trapframe(a0=0);设 child->state = RUNNABLE
+ * 后返回——父继续运行,子由 scheduler 稍后选中。 */
 struct proc *
 fork(void)
 {
@@ -113,12 +250,13 @@ fork(void)
     child->trapframe->a0 = 0;
 
     child->parent = parent;
-    curproc = child;
-
+    child->state = RUNNABLE;       /* lab4:不再 curproc=child,等 scheduler 选中 */
     return child;
 }
 
 /* wait:等待 ZOMBIE 子进程并回收
+ * 阶段 1:无 sleep/wakeup,无 ZOMBIE 子进程时 yield() 重试
+ *  (阶段 2 sleep/wakeup 接入后改 sleep 唤醒父进程)。
  * status_va 非 0 时把子进程退出状态 copyout 到该用户地址;
  * copyout 失败返回 -1,子进程保持 ZOMBIE(下次 wait 重试)。 */
 int
@@ -126,42 +264,40 @@ wait(uint64 status_va)
 {
     struct proc *p = myproc();
 
-    for (struct proc *c = proc; c < &proc[NPROC]; c++) {
-        if (c->parent == p && c->state == ZOMBIE) {
-            int pid = c->pid;
-            if (status_va &&
-                copyout(p->pagetable, status_va,
-                        (char *)&c->exit_status, sizeof(c->exit_status)) < 0)
-                return -1;
-            freeproc(c);
-            return pid;
+    for (;;) {
+        for (struct proc *c = proc; c < &proc[NPROC]; c++) {
+            if (c->parent == p && c->state == ZOMBIE) {
+                int pid = c->pid;
+                if (status_va &&
+                    copyout(p->pagetable, status_va,
+                            (char *)&c->exit_status, sizeof(c->exit_status)) < 0)
+                    return -1;
+                freeproc(c);
+                return pid;
+            }
         }
+        /* 阶段 1:无 ZOMBIE 子进程,让出 CPU 让子进程运行后重试 */
+        yield();
     }
-    return -1;  /* 没有 ZOMBIE 子进程 */
 }
 
 /* exit_current:终止当前进程(exit 系统调用与异常被杀共用)
- * 标 ZOMBIE 并记录状态,切回父进程;无父进程(初始进程)则停机。 */
+ * lab4 改造:不再 curproc = parent,改为 ZOMBIE + sched();
+ * 父进程 wait 会回收它。无父进程(初始进程)也走 ZOMBIE + sched,
+ * 让 scheduler 继续跑其他 RUNNABLE 进程。 */
 void
 exit_current(int status)
 {
     struct proc *p = myproc();
-
     p->exit_status = status;
     p->state = ZOMBIE;
-
-    if (p->parent) {
-        curproc = p->parent;
-    } else {
-        /* 初始进程退出:无父进程可切,停机(后续实验改走调度器) */
-        intr_off();
-        for (;;) { }
-    }
+    sched();
 }
 
 /* freeproc:释放一个进程的全部资源
  * 用户页表(含数据页、中间页表页)由 uvmfree 回收;
- * trapframe 物理页归 tf_pool(uvmfree 已跳过);内核栈映射拆除回收。 */
+ * trapframe 物理页归 tf_pool(uvmfree 已跳过);内核栈映射拆除回收。
+ * lab4:同步清零 context 与调度字段。 */
 void
 freeproc(struct proc *p)
 {
@@ -179,4 +315,11 @@ freeproc(struct proc *p)
     p->pid = 0;
     p->sz = 0;
     p->exit_status = 0;
+
+    /* lab4:清零 context 与调度字段 */
+    for (int i = 0; i < (int)sizeof(p->context) / 8; i++)
+        ((uint64 *)&p->context)[i] = 0;
+    p->cpu_ticks = 0;
+    p->last_slice_ticks = 0;
+    p->tickets = 0;
 }

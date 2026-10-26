@@ -24,6 +24,7 @@ void usertrapret(void);
 extern int plic_claim(void);
 extern void plic_complete(int irq);
 extern void uartintr(void);
+void syscall(void);                /* syscall.c 定义:lab4 gifts/syscall.h 未含原型 */
 
 /* printf 声明(printf.c 中定义) */
 void printf(char *fmt, ...);
