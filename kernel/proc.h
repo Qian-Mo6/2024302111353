@@ -25,6 +25,10 @@
 
 #define NPROC 64              /* 进程表最大容量 */
 
+/* lab4 stage2:时钟中断与调度时间片常量 */
+#define TICKS_PER_SLICE 10           /* 每进程时间片长度(时钟 tick) */
+#define TIMER_INTERVAL 1000000       /* stimecmp 间隔(QEMU mtime≈10MHz,1M≈0.1s) */
+
 /* lab4:进程状态增加 SLEEPING */
 enum procstate { UNUSED, USED, RUNNING, RUNNABLE, SLEEPING, ZOMBIE };
 
@@ -61,6 +65,7 @@ struct proc {
     uint64 kstack;                /* 内核栈顶 VA(内核页表 KSTACK 高地址映射) */
     uint64 sz;                    /* 用户地址空间大小 = 堆顶 VA(字节) */
     int exit_status;              /* exit/kill 状态,wait copyout 给父进程 */
+    void *chan;                   /* lab4 stage2:sleep/wakeup 等待条件 */
 
     /* lab4 调度统计与策略字段(schedstat.patch §kernel/proc.h) */
     int cpu_ticks;                /* 自创建以来累计 CPU tick */
@@ -84,3 +89,7 @@ void sched(void);                 /* 从当前进程切回 scheduler */
 void yield(void);                 /* 当前进程主动让出 CPU */
 void forkret(void);               /* 新进程内核态入口:完成初始化后 usertrapret */
 int  random(void);                /* 31 位 LFSR 伪随机,彩票策略用 */
+
+/* lab4 stage2:sleep/wakeup */
+void sleep(void *chan);
+void wakeup(void *chan);

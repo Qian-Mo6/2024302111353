@@ -228,6 +228,8 @@ main(void)
     printf("plic inited (UART0 IRQ=%d enabled)\n", UART0_IRQ);
 
     w_sie(r_sie() | SIE_SEIE);
+    /* lab4 stage2 时钟中断暂时禁用(CLINT MMIO 映射问题待调试)
+     * sleep/wakeup/sys_pause 逻辑不依赖时钟,先推进阶段 3-4 */
 
     /* 内核页表:恒等映射全部 RAM + UART/PLIC + TRAMPOLINE;
      * 须在首个 allocproc 之前建好(kstack_map/uvmcreate 依赖它) */

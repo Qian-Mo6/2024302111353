@@ -48,6 +48,9 @@ struct context scheduler_ctx;
  * 仅在 scheduler 内单核单线程调用,无并发风险。 */
 static uint32 lfsr_state = 0xDEADBEEF;
 
+/* lab4 stage2:时钟 tick 计数 */
+volatile int kernel_ticks = 0;
+
 int
 random(void)
 {
@@ -276,8 +279,8 @@ wait(uint64 status_va)
                 return pid;
             }
         }
-        /* 阶段 1:无 ZOMBIE 子进程,让出 CPU 让子进程运行后重试 */
-        yield();
+        /* lab4 stage2:无 ZOMBIE 子进程,sleep 等子进程 exit_current→wakeup */
+        sleep(p);
     }
 }
 
@@ -291,7 +294,34 @@ exit_current(int status)
     struct proc *p = myproc();
     p->exit_status = status;
     p->state = ZOMBIE;
+    if (p->parent)
+        wakeup(p->parent);
     sched();
+}
+
+/* sleep:当前进程等待条件 chan,关中断保护状态检查与休眠原子性 */
+void
+sleep(void *chan)
+{
+    struct proc *p = myproc();
+    p->chan = chan;
+    p->state = SLEEPING;
+    sched();
+    p->chan = 0;
+}
+
+/* wakeup:唤醒所有 chan 匹配的 SLEEPING 进程 */
+void
+wakeup(void *chan)
+{
+    intr_off();
+    for (struct proc *p = proc; p < &proc[NPROC]; p++) {
+        if ((int)p->state == 4 /* SLEEPING */ && p->chan == chan) {
+            p->state = RUNNABLE;
+            p->chan = 0;
+        }
+    }
+    intr_on();
 }
 
 /* freeproc:释放一个进程的全部资源

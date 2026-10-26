@@ -546,8 +546,7 @@ kstack_unmap(int idx)
  *   不变式:内核必须经恒等映射直接读写一切"分配出去"的物理页
  *   (页表页、用户数据页、受控拷贝的物理中转)。
  * - 外设必需映射:UART(串口寄存器)、PLIC(claim/complete)。
- *   CLINT 不映射:本内核时钟访问经 rdtime/stimecmp CSR(Sstc 扩展)
- *   进行,不读写 CLINT MMIO 寄存器——保持最小映射面,设计笔记中说明。
+ *   CLINT 不映射:时钟中断初始化暂延后,先推进阶段 3-4。
  * - TRAMPOLINE 映射在最高地址:跳板页必须与用户页表同址,
  *   uservec/userret 切 satp 前后指令流才能不断档。
  * - TRAPFRAME 不进内核页表:内核经 p->trapframe 的内核 VA(bss 恒等映射)
@@ -580,6 +579,8 @@ kvminit(uint64 trampoline_pa)
      *   PLIC_SCLAIM 在偏移 0x201004,故映射区必须 > 2MB,这里用 4MB 0x400000) */
     if (mappages(kpgtbl, PLIC, 0x400000, PLIC, PTE_R | PTE_W | PTE_A | PTE_D) != 0)
         vm_panic("kvminit: map PLIC");
+
+    /* CLINT 不映射:时钟中断暂延后 */
 
     /* TRAMPOLINE 需要单独映射(在高地址,不在 superpage 范围内) */
     if (mappages(kpgtbl, TRAMPOLINE, PGSIZE, trampoline_pa, PTE_R | PTE_X | PTE_A | PTE_D) != 0)

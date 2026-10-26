@@ -25,6 +25,7 @@ extern int plic_claim(void);
 extern void plic_complete(int irq);
 extern void uartintr(void);
 void syscall(void);                /* syscall.c 定义:lab4 gifts/syscall.h 未含原型 */
+extern struct proc *curproc;       /* proc.c 定义的当前进程指针 */
 
 /* printf 声明(printf.c 中定义) */
 void printf(char *fmt, ...);
@@ -71,7 +72,14 @@ kerneltrap(void)
     }
 
     if (scause == SCAUSE_TIMER_INTERRUPT) {
-        /* 时钟中断:lab4 处理 */
+        /* lab4 stage2:内核态时钟中断 - tick++ (CLINT MMIO 暂未映射,不重置定时器) */
+        extern volatile int kernel_ticks;
+        kernel_ticks++;
+        if (curproc) {
+            curproc->cpu_ticks++;
+            curproc->last_slice_ticks++;
+        }
+        /* TODO: 重置 stimecmp/mtimecmp 待 CLINT 映射问题解决后添加 */
     } else if (scause & SCAUSE_EXT_INTERRUPT) {
         devintr();
     } else {
@@ -111,7 +119,21 @@ usertrap(void)
         }
 
     } else if (scause == SCAUSE_TIMER_INTERRUPT) {
-        /* 时钟中断:lab4 处理 */
+        /* lab4 stage2:用户态时钟中断 - tick + 时间片到期 yield (CLINT 暂未映射) */
+        extern volatile int kernel_ticks;
+        kernel_ticks++;
+        if (p) {
+            p->cpu_ticks++;
+            p->last_slice_ticks++;
+            if (p->last_slice_ticks >= TICKS_PER_SLICE) {
+                p->last_slice_ticks = 0;
+                p->state = RUNNABLE;
+                sched();
+                usertrapret();
+                return;
+            }
+        }
+        /* TODO: 重置 mtimecmp 待 CLINT 映射问题解决后添加 */
 
     } else {
         /* 用户异常(越界/保护页缺页/非法指令/写代码页等):

@@ -93,6 +93,16 @@ sys_exit(void)
     return 0;  /* 不会返回(curproc 已切到父进程) */
 }
 
+/* sys_pause:让当前进程 sleep,直到被 wakeup 显式唤醒 */
+static uint64
+sys_pause(void)
+{
+    extern void sleep(void *);
+    extern struct proc *myproc(void);
+    sleep(myproc());  /* 用自身进程指针当 chan */
+    return 0;
+}
+
 /* sys_exec(name, argv):从内嵌程序表 _uprog_table 加载程序
  *   a0 = name 用户指针(copyinstr 受控拷入)
  *   a1 = argv (忽略,规格允许)
@@ -256,6 +266,9 @@ syscall(void)
         break;
     case SYS_read:
         p->trapframe->a0 = sys_read();
+        break;
+    case SYS_pause:
+        p->trapframe->a0 = sys_pause();
         break;
     case SYS_exit:
         p->trapframe->a0 = sys_exit();
