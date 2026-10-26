@@ -93,13 +93,79 @@ sys_exit(void)
     return 0;  /* 不会返回(curproc 已切到父进程) */
 }
 
-/* sys_pause:让当前进程 sleep,直到被 wakeup 显式唤醒 */
+/* sys_pause(n):睡 n 个时钟 tick(倒计时语义,gift 测试依赖)
+ *   a0 = n;n<=0 直接返回。闹钟到期由 S-mode SSIP 路径
+ *   (timer_tick_smode)扫描唤醒,不走 chan/wakeup 通道。 */
 static uint64
 sys_pause(void)
 {
-    extern void sleep(void *);
+    extern volatile int kernel_ticks;
+    extern void sched(void);
+    struct proc *p = myproc();
+    int n = (int)p->trapframe->a0;
+    if (n > 0) {
+        p->alarm_ticks = kernel_ticks + n;  /* 先设闹钟再睡(顺序防漏醒) */
+        p->chan = 0;                        /* 不参与 chan 唤醒 */
+        p->state = SLEEPING;
+        sched();
+    }
+    return 0;
+}
+
+/* sys_schedstat(pid, cpu_va, slice_va):观测调度统计
+ *   用户侧 ABI(user.h/common.c 课程组提供,勿改):
+ *     int schedstat(int pid, int *cpu_ticks, int *last_slice_ticks)
+ *   a1/a2 是两个独立的 int 指针,各 copyout 4 字节;
+ *   pid=-1 表示查自身;查不到目标 pid 返回 -1。
+ *   排雷记录:曾误按 int[4] 在 a1 处一次拷 16 字节,越界 12 字节
+ *   覆盖 cpu_of 栈帧的 saved ra 槽(a1=sp+12,ra 槽在 sp+24),
+ *   ret 跳到 stats[3](pid)等小值 → main 重入 PC 爬行 → illegal 崩溃。 */
+static uint64
+sys_schedstat(void)
+{
+    extern struct proc proc[];
     extern struct proc *myproc(void);
-    sleep(myproc());  /* 用自身进程指针当 chan */
+    int pid = (int)myproc()->trapframe->a0;
+    uint64 cpu_va = myproc()->trapframe->a1;
+    uint64 slice_va = myproc()->trapframe->a2;
+    struct proc *target;
+
+    if (pid == -1) {
+        target = myproc();
+    } else {
+        target = 0;
+        for (struct proc *p = proc; p < &proc[64]; p++) {
+            if (p->pid == pid) { target = p; break; }
+        }
+    }
+    if (!target) return -1;
+
+    /* copyout:受控拷贝到用户空间,两个 int 各自独立 4 字节 */
+    int cpu = target->cpu_ticks;
+    if (copyout(myproc()->pagetable, cpu_va, (char *)&cpu, sizeof(int)) < 0)
+        return -1;
+    int slice = target->last_slice_ticks;
+    if (copyout(myproc()->pagetable, slice_va, (char *)&slice, sizeof(int)) < 0)
+        return -1;
+    return 0;
+}
+
+/* sys_time_rdtime():返回 mtime 当前值(微秒级计数)
+ *   CLINT_BASE=0x02000000L 在 memlayout.h 定义(kvminit 映射后可访问) */
+static uint64
+sys_time_rdtime(void)
+{
+    return *(volatile uint64 *)(CLINT_BASE + 0xbff8);
+}
+
+/* sys_setickets(n):设置本进程彩票票数,n<1 钳位到 1 */
+static uint64
+sys_setickets(void)
+{
+    extern struct proc *myproc(void);
+    int n = (int)myproc()->trapframe->a0;
+    if (n < 1) n = 1;
+    myproc()->tickets = n;
     return 0;
 }
 
@@ -284,6 +350,15 @@ syscall(void)
         break;
     case SYS_sbrk:
         p->trapframe->a0 = sys_sbrk();
+        break;
+    case SYS_schedstat:
+        p->trapframe->a0 = sys_schedstat();
+        break;
+    case SYS_time_rdtime:
+        p->trapframe->a0 = sys_time_rdtime();
+        break;
+    case SYS_setickets:
+        p->trapframe->a0 = sys_setickets();
         break;
     default:
         p->trapframe->a0 = -1;

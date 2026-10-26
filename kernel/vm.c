@@ -580,7 +580,10 @@ kvminit(uint64 trampoline_pa)
     if (mappages(kpgtbl, PLIC, 0x400000, PLIC, PTE_R | PTE_W | PTE_A | PTE_D) != 0)
         vm_panic("kvminit: map PLIC");
 
-    /* CLINT 不映射:时钟中断暂延后 */
+    /* CLINT 映射:sys_time_rdtime 需要读 mtime (偏移 0xbff8)
+     *   映射整个 2MB 区(SZ_2MB=0x200000),RW 权限,不开 MTIE 就不会触发中断 */
+    if (mappages(kpgtbl, CLINT_BASE, SZ_2MB, CLINT_BASE, PTE_R | PTE_W | PTE_A | PTE_D) != 0)
+        vm_panic("kvminit: map CLINT");
 
     /* TRAMPOLINE 需要单独映射(在高地址,不在 superpage 范围内) */
     if (mappages(kpgtbl, TRAMPOLINE, PGSIZE, trampoline_pa, PTE_R | PTE_X | PTE_A | PTE_D) != 0)

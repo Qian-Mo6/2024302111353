@@ -164,48 +164,51 @@ yield(void)
 }
 
 /* scheduler:单核 CPU 0 常驻调度主循环
- *   阶段 1 先实现纯 FIFO:for 遍历进程表挑 RUNNABLE,
- *   选到后 curproc=p、state=RUNNING → swtch。
- *   彩票策略在阶段 4 接入:遍历同时累计 RUNNABLE 总票数,
- *   random()%total 选中对应进程。 */
+ *   LAB4_POLICY_ID = 2024302111353 % 10 = 3 → 彩票调度
+ *   每次调度:累计所有 RUNNABLE 进程的 tickets,random()%total 抽签,
+ *   再遍历 RUNNABLE 进程累加 tickets 命中。
+ *   状态常量:RUNNABLE=3,绕过 enum 全局值传播优化坑。 */
 void
 scheduler(void)
 {
-    /* round-robin:从上次选的进程下一个开始扫描,避免低 index 进程饿死高 index
-     * 直接写常量:UNUSED=0 USED=1 RUNNING=2 RUNNABLE=3 SLEEPING=4 ZOMBIE=5
-     * 编译器 -O 会对 enum 做全局值传播导致状态语义颠倒,
-     * 绕过办法:用裸 int 常量 + 强转。 */
-    static struct proc *last_run = 0;
     for (;;) {
         struct proc *p = 0;
         struct proc *q;
 
-        if (last_run == 0 || last_run >= &proc[NPROC] - 1)
-            q = proc;
-        else
-            q = last_run + 1;
+        /* lab4 stage34:scheduler 空转时必须开中断——
+         * S 态 SIE=0 时 mtrap 注入的 SSIP 只能 pending 无法处理,
+         * pause 闹钟唤醒逻辑(timer_tick_smode)跑不了,会死锁:
+         * 所有进程睡着 → scheduler wfi 空转 → SSIP 永不陷入。
+         * 单核下开中断安全:kerneltrap 只做唤醒/计数,不切换进程。 */
+        intr_on();
 
-        for (; q < &proc[NPROC]; q++) {
-            if ((int)q->state == 3) {  /* RUNNABLE */
-                p = q;
-                break;
-            }
+        /* 第一轮:累计所有 RUNNABLE 进程的总票数 */
+        int total = 0;
+        for (q = proc; q < &proc[NPROC]; q++) {
+            if ((int)q->state == 3)  /* RUNNABLE */
+                total += q->tickets;
         }
-        if (!p) {
-            for (q = proc; q <= last_run; q++) {
-                if ((int)q->state == 3) {
+
+        if (total == 0) {
+            asm volatile("wfi");
+            continue;
+        }
+
+        /* 抽签:random() % total 落在哪个票区间 */
+        int ticket = random() % total;
+        int cumulative = 0;
+        for (q = proc; q < &proc[NPROC]; q++) {
+            if ((int)q->state == 3) {
+                cumulative += q->tickets;
+                if (ticket < cumulative) {
                     p = q;
                     break;
                 }
             }
         }
 
-        if (!p) {
-            asm volatile("wfi");
-            continue;
-        }
+        if (!p) continue;
 
-        last_run = p;
         curproc = p;
         p->state = 2;  /* RUNNING */
         swtch(&scheduler_ctx, &p->context);
@@ -324,6 +327,23 @@ wakeup(void *chan)
     intr_on();
 }
 
+/* timer_tick_smode:S-mode 时钟 tick 路径(usertrap/kerneltrap 的 SSIP 分支)调用。
+ * 扫描进程表,把 pause(n) 闹钟到期的 SLEEPING 进程唤醒为 RUNNABLE。
+ * 单核 + trap 上下文,无锁;sys_pause 先设 alarm 再置 SLEEPING,顺序防漏醒。 */
+void
+timer_tick_smode(void)
+{
+    extern volatile int kernel_ticks;
+    struct proc *q;
+    for (q = proc; q < &proc[NPROC]; q++) {
+        if ((int)q->state == 4 /* SLEEPING */ && q->alarm_ticks != 0 &&
+            kernel_ticks >= q->alarm_ticks) {
+            q->alarm_ticks = 0;
+            q->state = RUNNABLE;
+        }
+    }
+}
+
 /* freeproc:释放一个进程的全部资源
  * 用户页表(含数据页、中间页表页)由 uvmfree 回收;
  * trapframe 物理页归 tf_pool(uvmfree 已跳过);内核栈映射拆除回收。
@@ -352,4 +372,5 @@ freeproc(struct proc *p)
     p->cpu_ticks = 0;
     p->last_slice_ticks = 0;
     p->tickets = 0;
+    p->alarm_ticks = 0;
 }

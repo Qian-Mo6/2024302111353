@@ -452,6 +452,11 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define SCAUSE_LOAD_PAGE 13
 #define SCAUSE_STORE_PAGE 15
 #define SCAUSE_EXT_INTERRUPT  (1L << 63)
-#define SCAUSE_TIMER_INTERRUPT (1L << 63) + 5
+/* 注意:delegated MTIP 进 S-mode trap 时 cause code 保持 7;
+ * S-mode 原生定时器(STIP, stimecmp) cause code 是 5;
+ * 两种都要匹配 */
+#define SCAUSE_SUP_SOFTWARE ((1L << 63) | 1)       /* SSIP:M-mode mtrap 每 tick 注入 */
+#define SCAUSE_TIMER_INTERRUPT_5 ((1L << 63) | 5)  /* STIP, stimecmp 触发 */
+#define SCAUSE_TIMER_INTERRUPT   ((1L << 63) | 7)  /* MTIP, CLINT mtimecmp 委托 */
 
 #endif // RISCV_H

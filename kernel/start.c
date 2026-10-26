@@ -1,65 +1,92 @@
 /*
- * lab1 阶段二 · start.c：M → S 特权级切换
+ * lab1 阶段二 · start.c:M → S 特权级切换
  *
- * 阶段二目标：在 start() 中完成 M 态初始化配置，通过 mret 跳到 main()，
- *            在 main() 中向串口写 'B'，证明 CPU 成功切换至 S 态运行。
+ * lab4 stage34 增量:
+ *   - mtrap_c():M-mode 时钟中断处理体(由 kernelvec.S 的 mtrapvec 调用):
+ *     重置 CLINT mtimecmp(偏移 0x4000!)、tick 计数、注入 SSIP 通知 S-mode。
+ *   - MTIP 不委托到 S-mode(mideleg.MTIP=0),mtimecmp 只能 M-mode 写。
+ *   - mtvec 指向汇编入口 mtrapvec(4 字节对齐):被中断代码可能处于
+ *     trampoline(用户页表/用户栈),M-mode 访存不经 satp 翻译,
+ *     必须切到专用 M-mode 栈并保存全部调用者保存寄存器。
  *
- * 关键配置（执行 mret 之前必须完成）：
- *   1. PMP 配置：赋予 S 态与 U 态对全部物理地址空间的 R/W/X 权限
- *      （否则 mret 后 S 态取指即触发 cause=1 取指访问异常）
- *   2. 异常/中断委托：medeleg / mideleg 把异常和中断委托给 S 态处理
- *   3. satp = 0：禁用分页（lab1 不用虚拟内存）
- *   4. mepc = main：mret 跳转目标
- *   5. mstatus.MPP = S：mret 后进入 S 态
- *   6. mret：硬件切换特权级 + 跳到 mepc
+ * CLINT 偏移(xv6-riscv 原版):
+ *   MTIMECMP(hart) = CLINT_BASE + 0x4000 + 8*hartid
+ *   MTIME          = CLINT_BASE + 0xBFF8
  */
 
 #include "types.h"
 #include "riscv.h"
+#include "memlayout.h"
+#include "proc.h"
 
-/* PMP 地址覆盖整个物理地址空间（RISC-V PMP 使用自然地址 = 物理地址 >> 2）。
- * 0x3fffffffffffff 自然地址 → 物理地址 0xfffffffffffffc（覆盖全空间）
- * pmpcfg0 = 0xf：第 0 个 PMP 区域配置为 TOR(Top Of Range) + R + W + X
- *   - bits[1:0] = 0b11 = TOR 模式（地址匹配 [pmpaddr[i-1], pmpaddr[i])）
- *   - bit[2] A field 不需要，bit[3-4] X/W = 1，bit[5] R = 1
- *   - 注意：在 RV64 中 pmpcfg 是 8 字节，每区域 1 字节
- *   - 实际含义见 RISC-V Privileged ISA 3.7.1
- */
 #define PMP_ADDR_ALL  0x3fffffffffffffull
-#define PMP_CFG_ALL_RWX 0x1f   /* L=0, A=TOR, X=1, W=1, R=1（位顺序 L|X|W|R|A|A */
+#define PMP_CFG_ALL_RWX 0x1f
+#define TIMER_INTERVAL 1000000   /* 与 proc.h 保持一致 */
+
+/* M-mode 时钟中断 C 处理体(mtrapvec 调用):
+ *   1. 重置 mtimecmp —— MTIP 是电平触发,不重置会无限重陷;
+ *   2. kernel_ticks/curproc 计数(schedstat 观测数据源);
+ *   3. 注入 SSIP:S-mode 每 tick 陷入一次,负责 pause 闹钟唤醒
+ *      与时间片让出(M-mode 不直接触碰 S-mode 调度逻辑)。 */
+void
+mtrap_c(void)
+{
+    *(volatile uint64 *)(CLINT_BASE + 0x4000) =
+        *(volatile uint64 *)(CLINT_BASE + 0xbff8) + TIMER_INTERVAL;
+
+    extern volatile int kernel_ticks;
+    kernel_ticks++;
+
+    extern struct proc *curproc;
+    if (curproc) {
+        curproc->cpu_ticks++;
+        curproc->last_slice_ticks++;
+    }
+
+    asm volatile("csrs sip, %0" : : "r"(1L << 1));  /* mip.SSIP=1 */
+}
 
 void
 start(void)
 {
-    /* ---- 1. PMP 配置：赋予 S 态访问全空间的 R/W/X 权限 ---- */
+    /* ---- 1. PMP 配置:赋予 S 态访问全空间的 R/W/X 权限 ---- */
     w_pmpaddr0(PMP_ADDR_ALL);
     w_pmpcfg0(PMP_CFG_ALL_RWX);
 
-    /* ---- 2. 异常与中断委托：把所有异常/中断委托给 S 态处理 ---- */
-    /* lab1 阶段二还没 trap handler，但委托必须做，否则异常会回到 M 态（也没处理） */
+    /* ---- 2. 异常/中断委托:MTIP(bit7) 留在 M-mode,其余委托 S-mode ---- */
     w_medeleg(0xffff);
-    w_mideleg(0xffff);
+    w_mideleg(0xffff & ~(1L << 7));
 
-    /* ---- 3. 禁用分页：satp = 0 让 S 态直接使用物理地址 ---- */
+    /* ---- 3. mtvec = mtrapvec(kernelvec.S,4 字节对齐) ---- */
+    extern void mtrapvec(void);
+    asm volatile("csrw 0x305, %0" : : "r"(mtrapvec));
+
+    /* ---- 4. 初始化 CLINT mtimecmp ----
+     * QEMU reset 后 mtime=mtimecmp=0,MTIP 常驻 pending,
+     * 必须先重置 mtimecmp 再开中断,否则开 MTIE 瞬间死循环 */
+    *(volatile uint64 *)(CLINT_BASE + 0x4000) =
+        *(volatile uint64 *)(CLINT_BASE + 0xbff8) + TIMER_INTERVAL;
+
+    /* ---- 5. 开 MIE.MTIE ---- */
+    w_mie(r_mie() | (1L << 7));
+
+    /* ---- 6. 禁用分页:satp = 0 ---- */
     w_satp(0);
 
-    /* ---- 4. mepc 设为 main 函数地址：mret 后跳到这里 ---- */
-    /* main 在 main.c 中定义；用 main 符号取地址（链接器解析） */
+    /* ---- 7. mepc = main ---- */
     extern void main(void);
     w_mepc((uint64)main);
 
-    /* ---- 5. mstatus.MPP 设为 S 态：mret 后 CPU 切到 S mode ---- */
+    /* ---- 8. mstatus:MPP=S(切 S 态) + MPIE=1(mret 后 MIE=1,
+     *     M-mode 时钟中断开始运转) + MIE=1 ---- */
     uint64 x = r_mstatus();
-    x &= ~MSTATUS_MPP_MASK;   /* 清 MPP 字段（bit 12:11） */
-    x |= MSTATUS_MPP_S;       /* 设为 S（01） */
+    x &= ~MSTATUS_MPP_MASK;
+    x |= MSTATUS_MPP_S;
+    x |= (1L << 3) | (1L << 7);   /* MIE | MPIE */
     w_mstatus(x);
 
-    /* ---- 6. mret：硬件完成特权级切换 + 跳到 mepc ---- */
-    /* 这个函数不会返回——CPU 已经跳到 main 了 */
+    /* ---- 9. mret:特权级切换 + 跳到 main ---- */
     asm volatile("mret");
 
-    /* 不应到达这里 */
-    while (1) {
-        ;
-    }
+    while (1) { ; }
 }

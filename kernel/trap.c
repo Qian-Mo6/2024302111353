@@ -71,7 +71,12 @@ kerneltrap(void)
         for (;;) { }
     }
 
-    if (scause == SCAUSE_TIMER_INTERRUPT) {
+    if (scause == SCAUSE_SUP_SOFTWARE) {
+        /* lab4 stage34:M-mode mtrap 每 tick 注入的 SSIP(tick 已由 M-mode 计数)。
+         * 内核态收到:清 pending + pause 闹钟唤醒,不切换(简化) */
+        asm volatile("csrc sip, %0" : : "r"(1L << 1));
+        timer_tick_smode();
+    } else if (scause == SCAUSE_TIMER_INTERRUPT) {
         /* lab4 stage2:内核态时钟中断 - tick++ (CLINT MMIO 暂未映射,不重置定时器) */
         extern volatile int kernel_ticks;
         kernel_ticks++;
@@ -110,6 +115,18 @@ usertrap(void)
     if (scause == SCAUSE_SYSCALL) {
         p->trapframe->epc = r_sepc() + 4;
         syscall();
+
+    } else if (scause == SCAUSE_SUP_SOFTWARE) {
+        /* lab4 stage34:M-mode mtrap 每 tick 注入的 SSIP:
+         * 清 pending → pause 闹钟唤醒 → 时间片用尽则让出 CPU */
+        asm volatile("csrc sip, %0" : : "r"(1L << 1));
+        timer_tick_smode();
+        if (p->last_slice_ticks >= TICKS_PER_SLICE) {
+            p->last_slice_ticks = 0;
+            yield();
+            usertrapret();
+            return;
+        }
 
     } else if (scause & SCAUSE_EXT_INTERRUPT) {
         p->trapframe->epc = r_sepc();
@@ -164,6 +181,12 @@ usertrapret(void)
     uint64 x = r_sstatus();
     x &= ~SSTATUS_SPP;
     x |= SSTATUS_SPIE;
+    /* lab4 stage34:打开浮点单元(sstatus.FS=Clean)——
+     * QEMU rv64gc 带 F/D 扩展但 FS 复位为 Off,浮点指令直接 illegal
+     * (lottery_test 算份额百分比用浮点);单核 + 测试仅单进程用浮点,
+     * 不做 F 寄存器上下文保存恢复(如需多浮点进程再扩展 trapframe) */
+    x &= ~(3L << 13);
+    x |= (1L << 13);   /* FS = 01 Initial */
     w_sstatus(x);
 
     w_sepc(p->trapframe->epc);

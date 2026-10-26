@@ -227,9 +227,7 @@ main(void)
     plicinit();
     printf("plic inited (UART0 IRQ=%d enabled)\n", UART0_IRQ);
 
-    w_sie(r_sie() | SIE_SEIE);
-    /* lab4 stage2 时钟中断暂时禁用(CLINT MMIO 映射问题待调试)
-     * sleep/wakeup/sys_pause 逻辑不依赖时钟,先推进阶段 3-4 */
+    w_sie(r_sie() | SIE_SEIE | (1L << 1));  /* +SIE.SSIE: SSIP(mtrap 注入的 tick 软件中断) */
 
     /* 内核页表:恒等映射全部 RAM + UART/PLIC + TRAMPOLINE;
      * 须在首个 allocproc 之前建好(kstack_map/uvmcreate 依赖它) */
@@ -237,6 +235,10 @@ main(void)
     pagetable_t kpgtbl = kvminit(trampoline_pa);
     printf("kpgtbl=%x, switching satp...\n", (uint64)kpgtbl);
     kvminithart(kpgtbl);
+
+    /* 注:MTIP 已在 start.c(M-mode)初始化,不委托到 S-mode;
+     *    时钟 tick 在 M-mode trap handler(mtrap)里计数,
+     *    S-mode trap handler 不再处理 MTIP */
 
 #if LAB3_UVM_SELFTEST
     /* 阶段四临时验证(验证通过后把上面的宏置 0):

@@ -26,7 +26,9 @@
 #define NPROC 64              /* 进程表最大容量 */
 
 /* lab4 stage2:时钟中断与调度时间片常量 */
-#define TICKS_PER_SLICE 10           /* 每进程时间片长度(时钟 tick) */
+#define TICKS_PER_SLICE 4            /* 每进程时间片长度(时钟 tick);
+                                  4 保证 200 tick 观测窗有 ~50 片,
+                                  彩票份额抽样波动 <±5pp(断言 ±15pp) */
 #define TIMER_INTERVAL 1000000       /* stimecmp 间隔(QEMU mtime≈10MHz,1M≈0.1s) */
 
 /* lab4:进程状态增加 SLEEPING */
@@ -71,6 +73,8 @@ struct proc {
     int cpu_ticks;                /* 自创建以来累计 CPU tick */
     int last_slice_ticks;         /* 最近一次连续运行的时间片长度(tick) */
     int tickets;                  /* 票数,彩票/步长策略使用;默认 60 */
+    int alarm_ticks;              /* lab4 stage34:pause(n) 倒计时闹钟
+                                     (kernel_ticks 绝对到期值;0=无闹钟) */
 };
 
 #endif
@@ -89,6 +93,7 @@ void sched(void);                 /* 从当前进程切回 scheduler */
 void yield(void);                 /* 当前进程主动让出 CPU */
 void forkret(void);               /* 新进程内核态入口:完成初始化后 usertrapret */
 int  random(void);                /* 31 位 LFSR 伪随机,彩票策略用 */
+void timer_tick_smode(void);      /* S-mode 时钟 tick 路径:pause 闹钟唤醒扫描 */
 
 /* lab4 stage2:sleep/wakeup */
 void sleep(void *chan);
